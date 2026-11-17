@@ -33,7 +33,7 @@ Each trained policy was captured with five samples. Each CPU/GPU export then pas
 | Drone / CPU | 0.010254 RPM | 8.3447e-7 |
 | Drone / CUDA | 0.011719 RPM | 1.0431e-6 |
 
-Assertions use zero relative tolerance. Go2 absolute bounds are 2e-6 rad for targets and 1e-5 for action feedback, respectively 5.6 and 7.0 times the largest measured errors. Drone bounds are 0.02 RPM and 2e-6 for action feedback, respectively 1.7 and 1.9 times the largest measured errors. These bounds cover measured CPU/CUDA differences while remaining small relative to actuator magnitudes.
+Assertions use zero relative tolerance. Go2 absolute bounds are 2e-6 rad for targets and 1e-5 for action feedback. These retain calibration across both trained checkpoint sets evaluated in this work, whose largest measured errors were 9.54e-7 rad and 3.64e-6 respectively; the current checkpoint has smaller errors. Drone bounds are 0.02 RPM and 2e-6 for action feedback, respectively 1.7 and 1.9 times the largest measured errors. These bounds cover measured CPU/CUDA differences while remaining small relative to actuator magnitudes.
 
 Feedback validation exposed the Go2 training reset's deferred forward update: immediately after `env.reset()`, cached observations describe the initial pose while public getters can still expose the preceding pose. The export validation callback synchronizes the physical state using public `set_qpos(..., zero_velocity=True)` before comparing raw getter values. No training reset behavior changed. Both declared feedback attributes are captured at the pre-observation phase; the normal environment methods perform their original in-place history writes. Drone replay retains the command snapshot used to form the cached relative-position observation and preserves both action-history slots.
 
@@ -58,13 +58,17 @@ The six exporter cases passed on CPU and CUDA simulation, including unbatched an
 
 The four deployment cases passed on CPU and CUDA simulation with Genesis debug checks enabled. They verify physical actuator effects, controller gains and saturation limits, command changes, feedback reset, and repeated propeller writes across control decimation. Maximum normalized physics error was 1.40e-8 against a 5e-8 bound. Intentionally applying propeller targets only once per control period caused the analytical velocity check to fail.
 
-An AST comparison against upstream confirmed that all 159 rigid-entity functions and 11 drone-entity functions preserve their signatures, bodies, and existing decorators. Only metadata annotations and imports were added. The initial required control/API/tensor-utility baseline passed all 67 cases. The final combined exporter/deployment/control/API suite passed **39 tests in 338.73 seconds** with `--backend cpu --dev -n 2` (the control suite also explicitly parametrizes a CUDA case). A separate focused test passed the final external/feedback-name validation. Repository Ruff checks and formatting passed on the complete diff; seven documentation code blocks and local links passed syntax/link checks. Both copied learned-policy bundles loaded and ran from a new directory with training imports blocked.
+The final environment-level suite passed **14 tests in 51.39 seconds** with `--backend cpu --dev -n 2`. The three independent environment cases also passed on CUDA with the final snapshot implementation. They cover original method execution, in-place history updates, repeated tensor references, external commands/time, semantics, reset, source isolation, and failed capture. Their largest measured actuator and feedback errors were 1.49e-8 and 2.98e-8, both checked at 5e-8.
+
+A cached distinct tensor view exposed a 0.01415 replay error despite passing export validation. The exporter now rejects shared-storage views with an actionable error before capture and if they appear between samples. The negative tests verify both paths. Both trained examples passed another 100-step replay with the guard enabled, with unchanged errors. Create views inside the original inference methods so their relationship is traced.
+
+An AST comparison against upstream confirmed that all 159 rigid-entity functions and 11 drone-entity functions preserve their signatures, bodies, and existing decorators. Only metadata annotations and imports were added. Before adding the environment-level entry point, the required control/API/tensor-utility baseline passed 67 cases and the combined exporter/deployment/control/API suite passed 39 cases. The core engine remained unchanged in this update. Complete-diff Ruff checks, formatting, documentation snippet syntax, and local links passed. Both newly copied learned-policy bundles loaded and ran from a new directory with training imports blocked.
 
 Run the focused suite with the optional extra installed:
 
 ```bash
-PYTHONPATH="$PWD" python -m pytest --backend cpu --dev tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py
-PYTHONPATH="$PWD" python -m pytest --backend gpu --dev tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py
+PYTHONPATH="$PWD" python -m pytest --backend cpu --dev tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py tests/integration/test_leapp_environment.py
+PYTHONPATH="$PWD" python -m pytest --backend gpu --dev tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py tests/integration/test_leapp_environment.py
 ```
 
 ## Reproduce and locate evidence
@@ -82,7 +86,7 @@ python examples/locomotion/go2_deploy.py --bundle out/leapp_go2_environment/poli
 python examples/drone/hover_deploy.py --bundle out/leapp_hover_environment/policy/policy.yaml
 ```
 
-A consolidated copy is retained under `/home/frlai/workspaces/projs/genesis-world/out/leapp_validation/`: `training/` contains checkpoints, configurations and curves; `bundles/` contains CPU/CUDA exports and rollout reports; `logs/` contains agent validation logs; `tested_sources/` preserves the exact example sources. Integrated test logs and dependency versions are at the archive root.
+A consolidated copy is retained under `/home/frlai/workspaces/projs/genesis-world/out/leapp_validation/environment_export/`: `training/` contains checkpoints, configurations and curves; `bundles/` contains CPU/CUDA exports and rollout reports; `logs/` contains agent validation logs; `tested_sources/` preserves the exact example sources. Integrated test logs and dependency versions are at the archive root.
 
 The original evidence lives in `/home/frlai/workspaces/projs/genesis-world-examples`:
 

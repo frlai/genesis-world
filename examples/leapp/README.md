@@ -44,6 +44,8 @@ The `prepare` methods run in order before `policy(env.get_observations())`; `act
 
 The feedback boundary is immediately before observation construction. Both examples carry `actions` and `last_actions`: observations read their original history slot, then `_update_history` copies the previous action before the new policy output is processed. This preserves Go2's actuator delay and the drone's older observation action. Reset restores the exported initial values. Export a freshly initialized environment for its canonical initial state, or pass an explicit `initial_state={...}` when exporting an environment that has already stepped. A live snapshot is not necessarily the task's reset state.
 
+Declare every external input and persistent tensor state. Other configuration tensors are constants, and custom nested objects are shared read-only during capture. Repeated references to one tensor are supported. Create tensor views inside the inference methods; distinct cached tensors sharing storage produce a binding error.
+
 Optional `sample_inputs` gives callers control of sample collection; otherwise `capture_steps` defaults to five. The callback API below remains useful for standalone tensor pipelines that have no environment methods.
 
 ## Export a standalone tensor pipeline
@@ -87,7 +89,7 @@ bundle = export_policy(
 
 The result is a pipeline YAML path. Keep its directory together: the ONNX model, external model data when present, feedback initialization, and the sibling `.genesis.json` controller/timing description are required for deployment.
 
-Built-in annotations cover base position, quaternion, linear and angular velocity, joint position/velocity, joint position/velocity/force control, and drone propeller RPM. The metadata preserves ordered joint selections, Genesis quaternion order, coordinate frames, and physical units. Use `input_semantics={'command': TensorMetadata(...)}` to describe external commands. For a command shaped `(num_envs, num_components)`, set `system_axis=0` and provide component names in their numerical order. Leave the system axis unspecified for shared or scalar inputs. Quantity labels describe physical boundaries, rather than normalized mixed observation vectors. Declare `system_axis=0` for a batched external command; shared vectors and scalar inputs need no system axis. LEAPP 0.8.1 accepts `is_setpoint=True` on command inputs only. Actuator ports preserve their target meaning through the control setter and value-parameter binding.
+Built-in annotations cover base position, quaternion, linear and angular velocity, joint position/velocity, joint position/velocity/force control, and drone propeller RPM. The metadata preserves ordered joint selections, Genesis quaternion order, coordinate frames, and physical units. Use `input_semantics={'command': TensorMetadata(...)}` to describe external commands. For a command shaped `(num_envs, num_components)`, set `system_axis=0` and provide component names in their numerical order. Leave the system axis unspecified for shared or scalar inputs. Quantity labels describe physical boundaries, rather than normalized mixed observation vectors. LEAPP 0.8.1 accepts `is_setpoint=True` on command inputs only. Actuator ports preserve their target meaning through the control setter and value-parameter binding.
 
 To extend an entity API, register its raw getter with `tensor_input` or its actuator argument with `tensor_output` from `genesis.utils.leapp.annotations`. These decorators return the original function. Export adapters consume their metadata only during capture. Additional preprocessing can use supported PyTorch or NumPy operations inside the same callback.
 
@@ -140,5 +142,3 @@ The native reference and independent deployment each run 4,500 steps, spanning t
 Each exporter writes `validation.json` and the example's `scene.json` beside the pipeline. Each deployment launcher writes `rollout.json` under its output directory. The scene file contains only the example's authored setup. General exporters and runners have no task-name dispatch.
 
 Measured full-training and deployment results are recorded in [VALIDATION.md](VALIDATION.md).
-
-See [VALIDATION.md](VALIDATION.md) for measured full-training, export, and independent deployment results.
