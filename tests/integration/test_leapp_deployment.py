@@ -84,8 +84,8 @@ def test_policy_control_and_reset(n_envs, show_viewer, tmp_path):
                 drone_mass + drone_damping * scene.dt
             )
         deployment.step({"command": command_step, "rpm": rpm})
-        assert_allclose(cube.get_dofs_control_force(dofs_idx_local=[1, 0]), expected_force, tol=2e-6)
-        assert_allclose(drone.get_dofs_velocity(dofs_idx_local=2)[..., 0], drone_velocity, tol=2e-6)
+        assert_allclose(cube.get_dofs_control_force(dofs_idx_local=[1, 0]), expected_force, tol=5e-8)
+        assert_allclose(drone.get_dofs_velocity(dofs_idx_local=2)[..., 0], drone_velocity, tol=5e-8)
         if i_step == 0:
             first_force = expected_force.clone()
         memory = 0.5 * memory + 0.1 * command_step
@@ -97,7 +97,7 @@ def test_policy_control_and_reset(n_envs, show_viewer, tmp_path):
     assert_equal(rpm, initial_rpm)
     assert_equal(cube.get_pos(), initial_position)
     deployment.step({"command": command, "rpm": rpm})
-    assert_allclose(cube.get_dofs_control_force(dofs_idx_local=[1, 0]), first_force, tol=2e-6)
+    assert_allclose(cube.get_dofs_control_force(dofs_idx_local=[1, 0]), first_force, tol=5e-8)
 
     with pytest.raises(ValueError, match="External input names"):
         deployment.read_inputs({"command": command})
@@ -113,7 +113,8 @@ def test_policy_control_and_reset(n_envs, show_viewer, tmp_path):
 
 @pytest.mark.required
 @pytest.mark.precision("32")
-def test_controller_configuration(show_viewer, tmp_path):
+@pytest.mark.parametrize("control", ["position", "force"])
+def test_controller_configuration(control, show_viewer, tmp_path):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -138,14 +139,18 @@ def test_controller_configuration(show_viewer, tmp_path):
     command = torch.tensor([[0.1, 0.2]], dtype=gs.tc_float, device=gs.device)
 
     def policy_step(entities, inputs, state):
-        positions = entities["cube"].get_dofs_position(dofs_idx_local=[1, 0])
-        entities["cube"].control_dofs_position(positions + inputs["command"], dofs_idx_local=[1, 0])
+        if control == "position":
+            positions = entities["cube"].get_dofs_position(dofs_idx_local=[1, 0])
+            entities["cube"].control_dofs_position(positions + inputs["command"], dofs_idx_local=[1, 0])
+        else:
+            entities["cube"].control_dofs_force(100 * inputs["command"], dofs_idx_local=[1, 0])
         return state
 
     entities = {"cube": cube}
     bundle = export_policy(policy_step, entities, [{"command": command}], {}, tmp_path, step_dt=scene.dt)
     cube.set_dofs_kp(0.0)
     cube.set_dofs_kv(0.0)
+    cube.set_dofs_force_range(float("-inf"), float("inf"))
     deployment = LeappDeployment(scene, bundle, entities)
     assert_equal(cube.get_dofs_kp(dofs_idx_local=[1, 0]), [20.0, 10.0])
     assert_equal(cube.get_dofs_kv(dofs_idx_local=[1, 0]), [2.0, 1.0])
@@ -154,6 +159,8 @@ def test_controller_configuration(show_viewer, tmp_path):
     assert_equal(force_upper, [5.0, float("inf")])
     deployment.step({"command": command})
     assert (cube.get_dofs_velocity(dofs_idx_local=[1, 0]) > 0).all()
+    if control == "force":
+        assert_equal(cube.get_dofs_control_force(dofs_idx_local=[1, 0]), [5.0, 20.0])
 
     metadata = load_metadata(bundle)
     save_metadata(bundle, replace(metadata, step_dt=1.5 * scene.dt))
