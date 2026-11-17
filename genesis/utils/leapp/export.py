@@ -13,6 +13,7 @@ import torch
 
 import leapp
 from leapp import Axis, TensorSemantics, annotate
+from leapp.leapp_graph.datatypes.traced_data import TracedData
 
 from genesis.utils.misc import tensor_to_array
 
@@ -32,16 +33,16 @@ from .types import (
 
 
 def _semantics(name, tensor, metadata, connection, *, is_batched):
-    axes = []
-    if is_batched:
-        axes.append(Axis("system"))
+    axes_trailing = []
     if metadata.element_names is not None:
-        axes.append(Axis("element", names=list(metadata.element_names)))
+        axes_trailing.append(Axis("element", names=list(metadata.element_names)))
     if metadata.component_names is not None:
-        axes.append(Axis("component", names=list(metadata.component_names)))
-    if len(axes) > tensor.ndim:
+        axes_trailing.append(Axis("component", names=list(metadata.component_names)))
+    axes = [Axis("system")] if is_batched else []
+    if len(axes) + len(axes_trailing) > tensor.ndim:
         raise ValueError(f"Semantic axes for '{name}' exceed its tensor rank.")
-    axes.extend([None] * (tensor.ndim - len(axes)))
+    axes.extend([None] * (tensor.ndim - len(axes) - len(axes_trailing)))
+    axes.extend(axes_trailing)
     extra = {"genesis_connection": connection_to_dict(connection)}
     if metadata.unit is not None:
         extra["unit"] = metadata.unit
@@ -64,6 +65,10 @@ def _named_values(names, values):
 
 
 def _selection_indices(selection, n_dofs):
+    if isinstance(selection, TracedData):
+        raise ValueError(
+            "Degree-of-freedom bindings must use static indices. Gather dynamic selections inside the policy."
+        )
     if selection is None:
         return list(range(n_dofs))
     if isinstance(selection, slice):
@@ -134,6 +139,8 @@ class _EntityCapture:
             semantics = _semantics(name, tensor, metadata, connection, is_batched=self.entity.scene.n_envs > 0)
             return annotate.input_tensors(self.node_name, [semantics])
         tensor = arguments.arguments[boundary.value_parameter]
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError("Exported actuator targets must be Torch tensors computed from policy inputs or state.")
         self.outputs[name] = _semantics(name, tensor, metadata, connection, is_batched=self.entity.scene.n_envs > 0)
         return None
 
@@ -146,7 +153,7 @@ def _controllers(entities, connections):
                 name
                 for connection in connections
                 if connection.entity_name == entity_name
-                and connection.method_name in ("control_dofs_position", "control_dofs_velocity")
+                and connection.method_name in ("control_dofs_position", "control_dofs_velocity", "control_dofs_force")
                 for name in connection.dof_names
             )
         )
@@ -229,6 +236,8 @@ def export_policy(
     try:
         with torch.no_grad():
             for inputs in sample_inputs:
+                if any(not isinstance(value, torch.Tensor) for value in inputs.values()):
+                    raise TypeError("External policy inputs must be named Torch tensors.")
                 annotations = {
                     f"external_{key}": _semantics(
                         f"external_{key}",
