@@ -50,6 +50,21 @@ Each rollout exercised command changes halfway through each episode and reset at
 
 These task metrics use CPU native and deployment rollouts. CUDA native rollouts also completed three episodes with zero failures: Go2 tracking RMSE 0.17797353 m/s and drone tracking RMSE 0.10855366 m. Long trajectories are evaluated by task metrics; floating-point trajectory equality is not required.
 
+## General exporter and deployment checks
+
+The six exporter cases passed on CPU and CUDA simulation, including unbatched and batched tensors, scalar commands, command-free pipelines, joint permutations, quaternion transforms, normalization, explicit feedback, reset, failed-capture cleanup, and ordinary Genesis imports with LEAPP blocked. Maximum observed target error was 2.98e-8 and feedback error was 1.19e-7; the assertions use 1e-7 and 2e-7 respectively. A deliberately halved exported target failed the held-out comparison.
+
+The four deployment cases passed on CPU and CUDA simulation with Genesis debug checks enabled. They verify physical actuator effects, controller gains and saturation limits, command changes, feedback reset, and repeated propeller writes across control decimation. Maximum normalized physics error was 1.40e-8 against a 5e-8 bound. Intentionally applying propeller targets only once per control period caused the analytical velocity check to fail.
+
+An AST comparison against upstream confirmed that all 159 rigid-entity functions and 11 drone-entity functions preserve their signatures, bodies, and existing decorators. Only metadata annotations and imports were added. The initial required control/API/tensor-utility baseline passed all 67 cases. The final combined exporter/deployment/control/API suite passed **39 tests in 338.73 seconds** with `--backend cpu --dev -n 2` (the control suite also explicitly parametrizes a CUDA case). A separate focused test passed the final external/feedback-name validation. Repository Ruff checks and formatting passed on the complete diff; seven documentation code blocks and local links passed syntax/link checks. Both copied learned-policy bundles loaded and ran from a new directory with training imports blocked.
+
+Run the focused suite with the optional extra installed:
+
+```bash
+PYTHONPATH="$PWD" python -m pytest --backend cpu --dev tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py
+PYTHONPATH="$PWD" python -m pytest --backend gpu --dev tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py
+```
+
 ## Reproduce and locate evidence
 
 From the repository root, after the installation in [README.md](README.md):
@@ -64,6 +79,8 @@ python examples/drone/hover_export.py --gpu -e leapp_hover_final_20261117 -o out
 python examples/locomotion/go2_deploy.py --bundle out/leapp_go2_final_sync/policy/policy.yaml
 python examples/drone/hover_deploy.py --bundle out/leapp_hover_final/policy/policy.yaml
 ```
+
+A consolidated copy is retained under `/home/frlai/workspaces/projs/genesis-world/out/leapp_validation/`: `training/` contains checkpoints, configurations and curves; `bundles/` contains CPU/CUDA exports and rollout reports; `logs/` contains agent validation logs; `tested_sources/` preserves the exact example sources. Integrated test logs and dependency versions are at the archive root.
 
 The original evidence lives in `/home/frlai/workspaces/projs/genesis-world-examples`:
 

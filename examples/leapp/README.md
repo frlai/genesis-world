@@ -51,7 +51,7 @@ bundle = export_policy(
 
 The result is a pipeline YAML path. Keep its directory together: the ONNX model, external model data when present, feedback initialization, and the sibling `.genesis.json` controller/timing description are required for deployment.
 
-Built-in annotations cover base position, quaternion, linear and angular velocity, joint position/velocity, joint position/velocity/force control, and drone propeller RPM. The metadata preserves ordered joint selections, Genesis quaternion order, coordinate frames, and physical units. Use `input_semantics={'command': TensorMetadata(...)}` to describe external commands. For a command shaped `(num_envs, num_components)`, set `system_axis=0` and provide component names in their numerical order. Leave the system axis unspecified for shared or scalar inputs. Quantity labels describe physical boundaries, rather than normalized mixed observation vectors.
+Built-in annotations cover base position, quaternion, linear and angular velocity, joint position/velocity, joint position/velocity/force control, and drone propeller RPM. The metadata preserves ordered joint selections, Genesis quaternion order, coordinate frames, and physical units. Use `input_semantics={'command': TensorMetadata(...)}` to describe external commands. For a command shaped `(num_envs, num_components)`, set `system_axis=0` and provide component names in their numerical order. Leave the system axis unspecified for shared or scalar inputs. Quantity labels describe physical boundaries, rather than normalized mixed observation vectors. Declare `system_axis=0` for a batched external command; shared vectors and scalar inputs need no system axis. LEAPP 0.8.1 accepts `is_setpoint=True` on command inputs only. Actuator ports preserve their target meaning through the control setter and value-parameter binding.
 
 To extend an entity API, register its raw getter with `tensor_input` or its actuator argument with `tensor_output` from `genesis.utils.leapp.annotations`. These decorators return the original function. Export adapters consume their metadata only during capture. Additional preprocessing can use supported PyTorch or NumPy operations inside the same callback.
 
@@ -104,3 +104,5 @@ The native reference and independent deployment each run 4,500 steps, spanning t
 Each exporter writes `validation.json` and the example's `scene.json` beside the pipeline. Each deployment launcher writes `rollout.json` under its output directory. The scene file contains only the example's authored setup. General exporters and runners have no task-name dispatch.
 
 Measured full-training and deployment results are recorded in [VALIDATION.md](VALIDATION.md).
+
+See [VALIDATION.md](VALIDATION.md) for measured full-training, export, and independent deployment results.
