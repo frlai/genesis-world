@@ -16,11 +16,18 @@ from genesis.utils.leapp.environment import export_environment
 class _ArmEnvironment:
     def __init__(self):
         self.scene = gs.Scene(
-            sim_options=gs.options.SimOptions(dt=0.01, substeps=1, gravity=(0.0, 0.0, 0.0)),
+            sim_options=gs.options.SimOptions(
+                dt=0.01,
+                substeps=1,
+                gravity=(0.0, 0.0, 0.0),
+            ),
             show_viewer=False,
         )
         self.robot = self.scene.add_entity(
-            morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", fixed=True),
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_link_arm.urdf",
+                fixed=True,
+            ),
         )
         self.scene.build(n_envs=1)
         self.dt = self.scene.dt
@@ -90,7 +97,8 @@ class _ArmEnvironment:
         self.update_observation()
 
 
-def _policy():
+@pytest.fixture
+def policy():
     model = torch.nn.Sequential(torch.nn.Linear(11, 2), torch.nn.Tanh()).to(device=gs.device, dtype=gs.tc_float)
     with torch.no_grad():
         model[0].weight.copy_(torch.linspace(-0.5, 0.5, 22, device=gs.device).reshape(2, 11))
@@ -100,9 +108,8 @@ def _policy():
 
 @pytest.mark.required
 @pytest.mark.precision("32")
-def test_export_original_environment(tmp_path, record_property):
+def test_export_original_environment(tmp_path, record_property, policy):
     env = _ArmEnvironment()
-    policy = _policy()
     tensor_names = ("commands", "elapsed_s", "history", "previous_actions", "observation")
     original_tensors = {name: getattr(env, name) for name in tensor_names}
     original_values = {name: value.clone() for name, value in original_tensors.items()}
@@ -139,6 +146,7 @@ def test_export_original_environment(tmp_path, record_property):
         reversed(dof_names(env.robot))
     )
     error_max = 0.0
+    feedback_error_max = 0.0
     with torch.no_grad():
         for _ in range(2):
             deployment.reset()
@@ -156,10 +164,14 @@ def test_export_original_environment(tmp_path, record_property):
                 )
                 actual = outputs[deployment.inference.outputs[0]]
                 error_max = max(error_max, (actual - expected.to(actual.device)).abs().max().item())
-                assert_allclose(actual, expected, tol=1e-7)
+                assert_allclose(actual, expected, tol=5e-8)
                 feedback = deployment.inference.value_dict["policy"]
-                assert_allclose(feedback["state_history_in"], env.history, tol=1e-7)
-                assert_allclose(feedback["state_previous_actions_in"], env.previous_actions, tol=1e-7)
+                for key, expected_state in (("history", env.history), ("previous_actions", env.previous_actions)):
+                    actual_state = feedback[f"state_{key}_in"]
+                    feedback_error_max = max(
+                        feedback_error_max, (actual_state - expected_state.to(actual_state.device)).abs().max().item()
+                    )
+                    assert_allclose(actual_state, expected_state, tol=5e-8)
             assert env.events == ["read", "observe", "act"] * 4
 
         deployment.reset()
@@ -168,18 +180,18 @@ def test_export_original_environment(tmp_path, record_property):
         env.apply_action(policy(env.get_observations()))
         expected = env.targets.clone()
         deployment.step({"command": env.commands, "time": env.elapsed_s})
-        assert_allclose(env.robot.get_dofs_control_force([1, 0]), expected, tol=1e-7)
+        assert_allclose(env.robot.get_dofs_control_force([1, 0]), expected, tol=5e-8)
         assert_allclose(env.scene.get_time(), env.dt, atol=1e-8)
         assert torch.any(env.robot.get_dofs_velocity() != 0)
     deployment.close()
     record_property("actuator_max_abs_error", error_max)
+    record_property("feedback_max_abs_error", feedback_error_max)
 
 
 @pytest.mark.required
 @pytest.mark.precision("32")
-def test_environment_capture_failure_isolated(tmp_path):
+def test_environment_capture_failure_isolated(tmp_path, policy):
     env = _ArmEnvironment()
-    policy = _policy()
     history = env.history.clone()
     previous = env.previous_actions.clone()
     env.fail = True
