@@ -1,6 +1,7 @@
 import torch
 
 import genesis as gs
+from genesis.utils.leapp.annotations import tensor_output
 
 from .description import DroneEntityDescription
 from .rigid_entity import RigidEntity
@@ -40,6 +41,7 @@ class DroneEntity(RigidEntity):
         )
         self._prev_prop_t = None
 
+    @tensor_output(value_parameter="propellers_rpm", kind="genesis/propeller_speed", unit="rpm", selection="propeller")
     def set_propellers_rpm(self, propellers_rpm):
         """
         Set the RPM (revolutions per minute) for each propeller in the drone.

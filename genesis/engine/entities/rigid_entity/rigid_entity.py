@@ -9,6 +9,7 @@ import genesis as gs
 from genesis.constants import link_ref_frame
 from genesis.typing import UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
+from genesis.utils.leapp.annotations import tensor_input, tensor_output
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_torch
 
 from ..base_entity import Entity
@@ -646,6 +647,7 @@ class KinematicEntity(Entity):
             gs.raise_exception("Neither `name` nor `uid` is provided.")
 
     @gs.assert_built
+    @tensor_input(kind="frame/position", component_names=("x", "y", "z"), unit="m")
     def get_pos(self, envs_idx=None, *, relative=True):
         """
         Returns position of the entity's base link.
@@ -667,6 +669,7 @@ class KinematicEntity(Entity):
         return self._solver.get_links_pos(self.base_link_idx, envs_idx, relative=relative)[..., 0, :]
 
     @gs.assert_built
+    @tensor_input(kind="frame/orientation", component_names=("qw", "qx", "qy", "qz"))
     def get_quat(self, envs_idx=None, *, relative=True):
         """
         Returns quaternion of the entity's base link.
@@ -688,6 +691,7 @@ class KinematicEntity(Entity):
         return self._solver.get_links_quat(self.base_link_idx, envs_idx, relative=relative)[..., 0, :]
 
     @gs.assert_built
+    @tensor_input(kind="frame/linear_velocity", component_names=("x", "y", "z"), unit="m/s", expressed_in="world")
     def get_vel(self, envs_idx=None, *, relative=True):
         """
         Returns linear velocity of the entity's base link.
@@ -711,6 +715,12 @@ class KinematicEntity(Entity):
         return self._solver.get_links_vel(self.base_link_idx, envs_idx, relative=relative)[..., 0, :]
 
     @gs.assert_built
+    @tensor_input(
+        kind="frame/angular_velocity",
+        component_names=("angular_x", "angular_y", "angular_z"),
+        unit="rad/s",
+        expressed_in="world",
+    )
     def get_ang(self, envs_idx=None):
         """
         Returns angular velocity of the entity's base link.
@@ -999,6 +1009,7 @@ class KinematicEntity(Entity):
         return self._solver.get_qpos(qs_idx, envs_idx)
 
     @gs.assert_built
+    @tensor_input(kind="joint/velocity", selection="dof")
     def get_dofs_velocity(self, dofs_idx_local=None, envs_idx=None):
         """
         Get the entity's dofs' velocity.
@@ -1019,6 +1030,7 @@ class KinematicEntity(Entity):
         return self._solver.get_dofs_velocity(dofs_idx, envs_idx)
 
     @gs.assert_built
+    @tensor_input(kind="joint/position", selection="dof")
     def get_dofs_position(self, dofs_idx_local=None, envs_idx=None):
         """
         Get the entity's dofs' position.
@@ -2612,6 +2624,7 @@ class RigidEntity(KinematicEntity):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
+    @tensor_output(value_parameter="force", kind="joint/effort", selection="dof")
     def control_dofs_force(self, force, dofs_idx_local=None, envs_idx=None):
         """
         Control the entity's dofs' motor force. This is used for force/torque control.
@@ -2634,6 +2647,7 @@ class RigidEntity(KinematicEntity):
         self._solver.control_dofs_force(force, dofs_idx, envs_idx)
 
     @gs.assert_built
+    @tensor_output(value_parameter="velocity", kind="joint/velocity", selection="dof")
     def control_dofs_velocity(self, velocity, dofs_idx_local=None, envs_idx=None):
         """
         Set the PD controller's target velocity for the entity's dofs. This is used for velocity control.
@@ -2656,6 +2670,7 @@ class RigidEntity(KinematicEntity):
         self._solver.control_dofs_velocity(velocity, dofs_idx, envs_idx)
 
     @gs.assert_built
+    @tensor_output(value_parameter="position", kind="joint/position", selection="dof")
     def control_dofs_position(self, position, dofs_idx_local=None, envs_idx=None):
         """
         Set the position controller's target position for the entity's dofs. The controller is a proportional term

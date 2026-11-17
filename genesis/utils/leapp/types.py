@@ -44,8 +44,8 @@ class Controller:
     dof_names: tuple[str, ...]
     kp: list[float]
     kv: list[float]
-    force_lower: list[float]
-    force_upper: list[float]
+    force_lower: list[float | None]
+    force_upper: list[float | None]
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,14 @@ def resolve_dofs(entity, names) -> list[int]:
 def propeller_names(entity) -> tuple[str, ...]:
     """Return propeller link names in the actuator's declared order."""
     return tuple(entity.morph.propellers_link_name)
+
+
+def connection_to_dict(connection: Connection) -> dict:
+    payload = asdict(connection)
+    payload["arguments"] = list(payload["arguments"])
+    if connection.dof_names is not None:
+        payload["dof_names"] = list(connection.dof_names)
+    return payload
 
 
 def connection_from_dict(payload) -> Connection:

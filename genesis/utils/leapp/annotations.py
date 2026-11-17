@@ -33,7 +33,7 @@ def tensor_input(*, kind=None, component_names=None, unit=None, expressed_in=Non
 def tensor_output(*, value_parameter, kind=None, unit=None, selection=None):
     """Register the physical target argument of a control setter, preserving its execution."""
     boundary = Boundary(
-        metadata=TensorMetadata(kind=kind, unit=unit, is_setpoint=True),
+        metadata=TensorMetadata(kind=kind, unit=unit),
         value_parameter=value_parameter,
         selection=selection,
     )
