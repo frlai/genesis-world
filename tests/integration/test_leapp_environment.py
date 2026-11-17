@@ -208,3 +208,18 @@ def test_environment_capture_failure_isolated(tmp_path, policy):
     deployment.step({"command": env.commands, "time": env.elapsed_s})
     assert_allclose(env.scene.get_time(), 2 * env.dt, atol=1e-8)
     deployment.close()
+
+
+@pytest.mark.required
+@pytest.mark.precision("32")
+def test_environment_rejects_cached_state_views(tmp_path, policy):
+    env = _ArmEnvironment()
+    previous = env.previous_actions.clone()
+    history = env.history.clone()
+    env.buffers["previous_actions"] = env.previous_actions.view_as(env.previous_actions)
+    with pytest.raises(ValueError, match="share storage"):
+        export_environment(env, policy, tmp_path)
+    assert_equal(env.previous_actions, previous)
+    assert_equal(env.history, history)
+    assert env.events == []
+    assert_equal(env.scene.get_time(), 0)
