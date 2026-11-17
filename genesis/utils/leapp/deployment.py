@@ -82,9 +82,9 @@ class LeappDeployment:
             node_name, tensor_name = port_name.split("/")
             node = self.inference.nodes[node_name]
             description = next(item for item in node.input_descriptions if item["name"] == tensor_name)
-            if "genesis_connection" not in description.get("extra", {}):
+            if "genesis_connection" not in description:
                 raise ValueError(f"Input '{port_name}' has no Genesis connection metadata.")
-            connection = connection_from_dict(description["extra"]["genesis_connection"])
+            connection = connection_from_dict(description["genesis_connection"])
             reader = None
             if connection.external_name is None:
                 if connection.entity_name not in entities:
@@ -117,9 +117,9 @@ class LeappDeployment:
             node_name, tensor_name = port_name.split("/")
             node = self.inference.nodes[node_name]
             description = next(item for item in node.output_descriptions if item["name"] == tensor_name)
-            if "genesis_connection" not in description.get("extra", {}):
+            if "genesis_connection" not in description:
                 raise ValueError(f"Output '{port_name}' has no Genesis connection metadata.")
-            connection = connection_from_dict(description["extra"]["genesis_connection"])
+            connection = connection_from_dict(description["genesis_connection"])
             if connection.entity_name not in entities:
                 raise ValueError(f"Output '{port_name}' requires entity '{connection.entity_name}'.")
             entity = entities[connection.entity_name]
