@@ -44,10 +44,10 @@ def test_complete_policy_export(tmp_path, n_envs, external_command, record_prope
     gravity = torch.tensor([0.0, 0.0, -1.0], device=gs.device, dtype=gs.tc_float)
     command_constant = torch.zeros(shape_command, device=gs.device, dtype=gs.tc_float)
 
-    def compute(position, velocity, orientation, command, previous):
+    def compute(position, velocity, orientation, command, previous, gain):
         projected_gravity = transform_by_quat(gravity.expand_as(command), inv_quat(orientation))
         observation = torch.cat((position * 0.5, velocity * 0.1, projected_gravity, command), dim=-1)
-        action = torch.tanh(actor((observation - observation_mean) * 0.8) + previous * 0.25)
+        action = torch.tanh(actor((observation - observation_mean) * gain) + previous * 0.25)
         target = torch.clip(action, -0.7, 0.7) * 0.3 + 0.1
         return action, target
 
@@ -59,6 +59,7 @@ def test_complete_policy_export(tmp_path, n_envs, external_command, record_prope
             entity.get_quat(relative=False),
             inputs["command"].mean(dim=-2) if external_command else command_constant,
             state["previous"],
+            inputs["gain"] if external_command else 0.8,
         )
         entity.control_dofs_position(target, [1, 0])
         return {"previous": action}
@@ -68,14 +69,21 @@ def test_complete_policy_export(tmp_path, n_envs, external_command, record_prope
             robot.set_dofs_position([value, -value])
             robot.set_dofs_velocity([value * 0.3, value * 0.7])
             yield (
-                {"command": torch.full(shape_history, value, device=gs.device, dtype=gs.tc_float)}
+                {
+                    "command": torch.full(shape_history, value, device=gs.device, dtype=gs.tc_float),
+                    "gain": torch.tensor(0.8 + value, device=gs.device, dtype=gs.tc_float),
+                }
                 if external_command
                 else {}
             )
 
     inputs_metadata = {
         "command": TensorMetadata(
-            kind="frame/twist", component_names=("x", "y", "angular_z"), is_setpoint=True, expressed_in="world"
+            kind="frame/twist",
+            system_axis=0 if n_envs else None,
+            component_names=("x", "y", "angular_z"),
+            is_setpoint=True,
+            expressed_in="world",
         )
     }
     bundle = export_policy(
@@ -100,6 +108,7 @@ def test_complete_policy_export(tmp_path, n_envs, external_command, record_prope
     assert descriptions["arm_get_quat_0"]["genesis_connection"]["arguments"] == [{"name": "relative", "value": False}]
     assert descriptions["arm_get_dofs_position_0"]["axes"][-1]["names"] == list(reversed(dof_names(robot)))
     if external_command:
+        assert descriptions["external_gain"]["axes"] == []
         assert descriptions["external_command"]["is_setpoint"]
         assert descriptions["external_command"]["axes"][-2] is None
         assert descriptions["external_command"]["axes"][-1]["names"] == ["x", "y", "angular_z"]
@@ -126,9 +135,18 @@ def test_complete_policy_export(tmp_path, n_envs, external_command, record_prope
             }
             if external_command:
                 inputs["policy/external_command"] = command
+                gain = torch.rand((), generator=generator, device=gs.device, dtype=gs.tc_float) + 0.4
+                inputs["policy/external_gain"] = gain
+            else:
+                gain = 0.8
             with torch.no_grad():
                 previous, target = compute(
-                    position, velocity, orientation, command.mean(dim=-2) if external_command else command, previous
+                    position,
+                    velocity,
+                    orientation,
+                    command.mean(dim=-2) if external_command else command,
+                    previous,
+                    gain,
                 )
             outputs = manager.run_policy(inputs)
             target_actual = outputs["policy/arm_control_dofs_position_0"]

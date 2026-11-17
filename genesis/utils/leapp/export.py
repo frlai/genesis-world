@@ -33,6 +33,8 @@ from .types import (
 
 
 def _semantics(name, tensor, metadata, connection, *, is_batched):
+    if metadata.system_axis not in (None, 0):
+        raise ValueError("The system axis must be the leading tensor axis.")
     axes_trailing = []
     if metadata.element_names is not None:
         axes_trailing.append(Axis("element", names=list(metadata.element_names)))
@@ -72,6 +74,11 @@ def _selection_indices(selection, n_dofs):
     if selection is None:
         return list(range(n_dofs))
     if isinstance(selection, slice):
+        if any(
+            value is not None and not isinstance(value, int)
+            for value in (selection.start, selection.stop, selection.step)
+        ):
+            raise ValueError("Degree-of-freedom slice bounds must be static integers.")
         return list(range(n_dofs))[selection]
     if isinstance(selection, torch.Tensor):
         selection = tensor_to_array(selection)
@@ -83,6 +90,8 @@ def _selection_indices(selection, n_dofs):
         if len(selection) != n_dofs:
             raise ValueError("Degree-of-freedom selection mask has the wrong length.")
         return [i_d for i_d, is_selected in enumerate(selection) if is_selected]
+    if any(not isinstance(value, int) for value in selection):
+        raise ValueError("Degree-of-freedom bindings must use static integer indices.")
     return list(selection)
 
 
@@ -244,7 +253,7 @@ def export_policy(
                         value,
                         input_semantics.get(key, TensorMetadata()),
                         Connection(external_name=key),
-                        is_batched=scene.n_envs > 0,
+                        is_batched=input_semantics.get(key, TensorMetadata()).system_axis == 0,
                     )
                     for key, value in inputs.items()
                 }

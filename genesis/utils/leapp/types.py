@@ -9,11 +9,13 @@ from pathlib import Path
 class TensorMetadata:
     """Describe a tensor's quantity and ordered final axes without importing an export backend.
 
-    ``element_names`` and ``component_names`` describe successive trailing axes. Any preceding axis is the system
-    axis. ``reference=None`` denotes the world frame. Units describe the stored values without converting them.
+    ``element_names`` and ``component_names`` describe successive trailing axes. ``system_axis=0`` declares a leading
+    batch axis. Other axes retain unspecified meaning. ``reference=None`` denotes the world frame. Units describe
+    the stored values without converting them.
     """
 
     kind: str | None = None
+    system_axis: int | None = None
     element_names: tuple[str, ...] | None = None
     component_names: tuple[str, ...] | None = None
     reference: str | None = None
