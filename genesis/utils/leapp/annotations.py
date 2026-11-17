@@ -89,7 +89,11 @@ def policy_environment(*, entities, inputs=(), state=(), prepare=(), action, ste
 
 
 def get_policy_environment(env) -> PolicyEnvironment:
-    function = inspect.unwrap(inspect.getattr_static(type(env), "get_observations"), stop=_ENVIRONMENTS.__contains__)
+    try:
+        function = inspect.getattr_static(type(env), "get_observations")
+    except AttributeError:
+        raise ValueError("Environment must define an annotated get_observations method.") from None
+    function = inspect.unwrap(function, stop=_ENVIRONMENTS.__contains__)
     try:
         return _ENVIRONMENTS[function]
     except KeyError:

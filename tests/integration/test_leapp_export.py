@@ -8,7 +8,7 @@ import torch
 
 import genesis as gs
 from genesis.utils.geom import inv_quat, transform_by_quat
-from genesis.utils.leapp import TensorMetadata, tensor_input
+from genesis.utils.leapp import EnvironmentInput, TensorMetadata, policy_environment, tensor_input
 from genesis.utils.leapp.annotations import get_boundary
 from genesis.utils.leapp.types import dof_names, load_metadata
 from genesis.utils.misc import BuildableMixin
@@ -17,6 +17,7 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 leapp = pytest.importorskip("leapp")
 
+from genesis.utils.leapp.environment import export_environment
 from genesis.utils.leapp.export import export_policy
 
 
@@ -171,6 +172,9 @@ def test_annotation_preserves_execution():
     annotated = tensor_input(kind="joint/position")(getter)
     assert annotated is getter
     assert_equal(annotated(3), 5)
+    annotated_environment = policy_environment(entities=("robot",), action="apply")(getter)
+    assert annotated_environment is getter
+    assert_equal(annotated_environment(3), 5)
 
     class Entity(BuildableMixin):
         _is_built = True
@@ -193,7 +197,12 @@ def test_annotation_preserves_execution():
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(gs.__file__.rsplit("/genesis/", 1)[0])
     process = subprocess.run(
-        [sys.executable, "-c", "import genesis, sys; assert 'leapp' not in sys.modules"],
+        [
+            sys.executable,
+            "-c",
+            "import genesis, sys; from genesis.utils.leapp import policy_environment, EnvironmentInput; "
+            "assert 'leapp' not in sys.modules",
+        ],
         env=environment,
         capture_output=True,
         text=True,
@@ -237,3 +246,101 @@ def test_capture_failure_restores_execution(tmp_path):
     inputs["policy/arm_get_dofs_position_0"][:] = 0.5
     outputs = manager.run_policy(inputs)
     assert_allclose(outputs["policy/arm_control_dofs_force_0"], np.full((1, 2), 0.05), atol=5e-9)
+
+
+@pytest.mark.required
+@pytest.mark.precision("32")
+def test_environment_collects_native_samples(tmp_path):
+    TensorDict = pytest.importorskip("tensordict").TensorDict
+
+    scene = gs.Scene(show_viewer=False)
+    robot = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file="urdf/simple/two_link_arm.urdf",
+            fixed=True,
+        ),
+    )
+    scene.build(n_envs=1)
+
+    class Environment:
+        def __init__(self):
+            self.scene = scene
+            self.robot = robot
+            self.dt = scene.dt
+            self.command = torch.full((1, 2), 0.3, device=gs.device, dtype=gs.tc_float)
+            self.actions = torch.zeros_like(self.command)
+            self.previous = torch.zeros_like(self.actions)
+            self.aliases = {"previous": self.previous}
+            self.observation = torch.zeros_like(self.actions)
+            self.events = []
+            self.read()
+            self.observe()
+
+        def read(self):
+            self.position = self.robot.get_dofs_position()
+
+        def observe(self):
+            self.observation.copy_(self.position + self.command + self.aliases["previous"])
+
+        def history(self):
+            self.previous.copy_(self.actions)
+
+        @policy_environment(
+            entities=("robot",),
+            inputs=(EnvironmentInput("command", "command"),),
+            state=("actions", "previous"),
+            prepare=("read", "observe", "history"),
+            action="apply",
+        )
+        def get_observations(self):
+            return TensorDict({"policy": self.observation}, batch_size=[1])
+
+        def apply(self, actions):
+            self.actions.copy_(torch.clip(actions, -0.5, 0.5))
+            self.robot.control_dofs_force(self.actions * 0.1)
+            self.events.append("action")
+
+        def step(self, actions):
+            self.apply(actions)
+            self.scene.step()
+            self.read()
+            self.observe()
+            self.history()
+            return self.get_observations()
+
+    def policy(observations):
+        return torch.tanh(observations["policy"] * 0.2)
+
+    env = Environment()
+    with torch.no_grad():
+        for _ in range(2):
+            env.step(policy(env.get_observations()))
+    position_expected = robot.get_dofs_position().clone()
+    actions_expected = env.actions.clone()
+    robot.set_dofs_position(0.0)
+    robot.set_dofs_velocity(0.0)
+    env = Environment()
+    bundle = export_environment(env, policy, tmp_path, capture_steps=3, rtol=2e-6, atol=2e-7)
+    assert env.events == ["action", "action"]
+    assert_equal(env.actions, actions_expected)
+    assert_equal(robot.get_dofs_position(), position_expected)
+    assert env.aliases["previous"] is env.previous
+    manager = leapp.InferenceManager(str(bundle))
+    inputs = manager.get_mock_input()
+    actions = previous = torch.zeros((1, 2), dtype=gs.tc_float)
+    for position, command in ((0.2, -0.6), (-0.4, 0.2), (0.1, 0.8)):
+        inputs["policy/robot_get_dofs_position_0"][:] = position
+        inputs["policy/external_command"][:] = command
+        outputs = manager.run_policy(inputs)
+        action = torch.clip(torch.tanh((position + command + previous) * 0.2), -0.5, 0.5)
+        assert_allclose(outputs["policy/robot_control_dofs_force_0"], action * 0.1, tol=1e-7)
+        previous, actions = actions, action
+    with pytest.raises(ValueError, match="exactly the annotated"):
+        export_environment(env, policy, tmp_path / "invalid", sample_inputs=[{}])
+    assert env.events == ["action", "action"]
+    assert_equal(env.actions, actions_expected)
+    env.command = [0.0, 0.0]
+    with pytest.raises(TypeError, match="external input attributes must be Torch tensors"):
+        export_environment(env, policy, tmp_path / "invalid_type")
+    with pytest.raises(ValueError, match="annotated get_observations"):
+        export_environment(object(), policy, tmp_path / "unannotated")

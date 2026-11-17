@@ -19,28 +19,28 @@ class _CaptureScene:
 
 def _snapshot(value, memo):
     """Own tensor/container storage while preserving repeated references in an environment snapshot."""
-    if id(value) in memo:
-        return memo[id(value)]
-    if isinstance(value, torch.Tensor):
-        result = value.clone()
-    elif isinstance(value, np.ndarray):
-        result = value.copy()
-    elif isinstance(value, dict):
-        result = {}
-        memo[id(value)] = result
-        result.update((key, _snapshot(item, memo)) for key, item in value.items())
-    elif isinstance(value, list):
-        result = []
-        memo[id(value)] = result
-        result.extend(_snapshot(item, memo) for item in value)
-    elif isinstance(value, tuple):
-        result = tuple(_snapshot(item, memo) for item in value)
-    elif isinstance(value, MethodType) and id(value.__self__) in memo:
-        result = MethodType(value.__func__, memo[id(value.__self__)])
-    else:
-        return value
-    memo[id(value)] = result
-    return result
+    pending = [value]
+    visited = set()
+    while pending:
+        item = pending.pop()
+        identity = id(item)
+        if identity in memo or identity in visited:
+            continue
+        visited.add(identity)
+        if isinstance(item, torch.Tensor):
+            memo[identity] = item.clone()
+        elif isinstance(item, np.ndarray):
+            memo[identity] = item.copy()
+        elif isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+        elif isinstance(item, MethodType) and id(item.__self__) in memo:
+            memo[identity] = MethodType(item.__func__, memo[id(item.__self__)])
+        else:
+            memo[identity] = item
+    return copy.deepcopy(value, memo)
 
 
 def export_environment(
@@ -97,7 +97,10 @@ def export_environment(
         for i_step in range(capture_steps):
             if i_step:
                 env.step(policy(env.get_observations()))
-            yield {name: getattr(env, item.attribute).clone() for name, item in inputs.items()}
+            sample = {name: getattr(env, item.attribute) for name, item in inputs.items()}
+            if any(not isinstance(value, torch.Tensor) for value in sample.values()):
+                raise TypeError("Environment external input attributes must be Torch tensors.")
+            yield _snapshot(sample, {})
 
     def step(adapters, external, state):
         owned = copy.copy(env)
