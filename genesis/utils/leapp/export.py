@@ -220,6 +220,7 @@ def export_policy(
     Each item of ``sample_inputs`` supplies named external tensors, such as commands, for another capture step. A
     generator may update real entity state between samples. Supply representative changing samples. ``step_dt`` is
     an integer multiple of the scene timestep. ``input_semantics`` optionally describes external tensor meanings.
+    Entity, external-input and feedback names start with a letter and contain only letters, digits and underscores.
 
     The returned YAML path references the model and initial feedback values. A sibling ``.genesis.json`` describes
     deployment timing and controllers. Validation compares cached outputs and feedback updates at ``rtol``/``atol``.
@@ -236,6 +237,8 @@ def export_policy(
     ratio = step_dt / scene.dt
     if not math.isfinite(ratio) or ratio < 1 or not math.isclose(ratio, round(ratio)):
         raise ValueError("Policy timestep must be a positive integer multiple of the scene timestep.")
+    if any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key) for key in initial_state):
+        raise ValueError("Feedback names must start with a letter and contain only letters, digits and underscores.")
     input_semantics = {} if input_semantics is None else input_semantics
     state = {key: value.clone() for key, value in initial_state.items()}
     connections = []
@@ -245,6 +248,10 @@ def export_policy(
     try:
         with torch.no_grad():
             for inputs in sample_inputs:
+                if any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key) for key in inputs):
+                    raise ValueError(
+                        "External input names must start with a letter and contain only letters, digits and underscores."
+                    )
                 if any(not isinstance(value, torch.Tensor) for value in inputs.values()):
                     raise TypeError("External policy inputs must be named Torch tensors.")
                 annotations = {

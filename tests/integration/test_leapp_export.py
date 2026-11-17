@@ -227,6 +227,10 @@ def test_capture_failure_restores_execution(tmp_path):
         entities["arm"].control_dofs_force(entities["arm"].get_dofs_position() * 0.1)
         return {}
 
+    with pytest.raises(ValueError, match="External input names"):
+        export_policy(valid_step, {"arm": robot}, [{"joint/command": position}], {}, tmp_path, step_dt=scene.dt)
+    with pytest.raises(ValueError, match="Feedback names"):
+        export_policy(valid_step, {"arm": robot}, [{}], {"previous/action": position}, tmp_path, step_dt=scene.dt)
     bundle = export_policy(valid_step, {"arm": robot}, [{}, {}], {}, tmp_path, step_dt=scene.dt)
     manager = leapp.InferenceManager(str(bundle))
     inputs = manager.get_mock_input()
