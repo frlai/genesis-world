@@ -77,6 +77,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+leapp = [
+    "leapp==0.8.1",
+]
 dev = [
     # FIXME: Remove this cap once pytest-forked becomes compatible with newer versions (pytest-forked#112)
     "pytest<9.2.0",
