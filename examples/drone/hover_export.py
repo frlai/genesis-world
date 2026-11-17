@@ -1,6 +1,7 @@
 """Export a trained hovering policy with its observation and actuator computations."""
 
 import argparse
+import copy
 import json
 import pickle
 from pathlib import Path
@@ -10,13 +11,15 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
-from genesis.utils.geom import inv_quat, transform_by_quat
 from genesis.utils.leapp.deployment import LeappDeployment
-from genesis.utils.leapp.export import export_policy
-from genesis.utils.leapp.types import TensorMetadata
+from genesis.utils.leapp.environment import export_environment
 
 from hover_env import HoverEnv
-from hover_policy import compute_observation, compute_targets
+
+
+class _ActuatorRecorder:
+    def set_propellers_rpm(self, targets):
+        self.targets = targets
 
 
 def main():
@@ -41,45 +44,8 @@ def main():
     runner.load(str(log_dir / f"model_{args.ckpt}.pt"))
     policy = runner.get_inference_policy(device=gs.device)
 
-    def policy_step(entities, inputs, state):
-        drone = entities["drone"]
-        quat = drone.get_quat()
-        inv_base_quat = inv_quat(quat)
-        observation = compute_observation(
-            inputs["command"] - drone.get_pos(),
-            quat,
-            transform_by_quat(drone.get_vel(), inv_base_quat),
-            transform_by_quat(drone.get_ang(), inv_base_quat),
-            state["observation_actions"],
-            env.obs_scales,
-        )
-        actions, propellers_rpm = compute_targets(policy({"policy": observation}), clip_actions=env_cfg["clip_actions"])
-        drone.set_propellers_rpm(propellers_rpm)
-        # The environment builds observations before copying the latest action into its history
-        return {"previous_actions": actions, "observation_actions": state["previous_actions"].clone()}
-
-    def samples():
-        for _ in range(5):
-            yield {"command": env.commands.clone()}
-            env.step(policy(env.get_observations()))
-
     with torch.no_grad():
-        bundle = export_policy(
-            policy_step,
-            {"drone": env.drone},
-            samples(),
-            {
-                "previous_actions": torch.zeros_like(env.actions),
-                "observation_actions": torch.zeros_like(env.actions),
-            },
-            args.output_dir,
-            step_dt=env.dt,
-            input_semantics={
-                "command": TensorMetadata(
-                    kind="frame/position", system_axis=0, component_names=("x", "y", "z"), is_setpoint=True
-                )
-            },
-        )
+        bundle = export_environment(env, policy, args.output_dir)
         (bundle.parent / "scene.json").write_text(json.dumps(env_cfg, indent=2) + "\n")
         deployment = LeappDeployment(env.scene, bundle, {"drone": env.drone}, reset_callback=env.reset)
         deployment.reset()
@@ -93,17 +59,20 @@ def main():
                 command_snapshot = env.commands.clone()
                 previous_actions.zero_()
             actions = policy(env.get_observations())
-            _, expected = compute_targets(actions, clip_actions=env_cfg["clip_actions"])
+            reference = copy.copy(env)
+            reference.drone = _ActuatorRecorder()
+            reference._apply_actions(actions)
+            expected = reference.drone.targets
             outputs = deployment.inference.run_policy(deployment.read_inputs({"command": command_snapshot}))
             actual = outputs[deployment.inference.outputs[0]]
             expected = expected.to(actual.device)
             error_max = max(error_max, (actual - expected).abs().max().item())
             torch.testing.assert_close(actual, expected, rtol=0, atol=0.02)
             feedback = deployment.inference.value_dict["policy"]
-            expected_actions = torch.clip(actions, -env_cfg["clip_actions"], env_cfg["clip_actions"])
+            expected_actions = reference.actions
             for key, expected_state in (
-                ("state_previous_actions_in", expected_actions),
-                ("state_observation_actions_in", previous_actions),
+                ("state_actions_in", expected_actions),
+                ("state_last_actions_in", previous_actions),
             ):
                 actual_state = feedback[key]
                 expected_state = expected_state.to(actual_state.device)
@@ -132,15 +101,11 @@ def main():
             env.commands[:, 1] = -0.5 if i_episode_step >= episode_steps // 2 else 0.0
             env.commands[:, 2] = 1.0
             command = env.commands.clone()
-            observation = compute_observation(
-                command - env.base_pos,
-                env.base_quat,
-                env.base_lin_vel,
-                env.base_ang_vel,
-                env.obs_buf[:, -env.num_actions :],
-                env.obs_scales,
-            )
-            env.step(policy({"policy": observation}))
+            reference = copy.copy(env)
+            reference.rel_pos = command - env.base_pos
+            reference.last_actions = env.obs_buf[:, -env.num_actions :]
+            reference._update_observation()
+            env.step(policy(reference.get_observations()))
             position = env.drone.get_pos()
             error_sum += (position - command).square().sum().item()
             height_min = min(height_min, position[:, 2].min().item())

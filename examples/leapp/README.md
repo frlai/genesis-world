@@ -10,9 +10,45 @@ python -m pip install -e '.[leapp]' 'rsl-rl-lib>=5.0.0,<6' tensordict tensorboar
 
 The integration uses LEAPP 0.8.1. Install the PyTorch build appropriate for your device before installing Genesis. Ordinary simulation and training can run with the export extra omitted.
 
-## Export your own pipeline
+## Export an annotated environment
 
-Implement one inference callback. Entity bindings supplied to it provide annotated public getters and control setters. Command tensors and feedback state are explicit inputs. Pass tensor-valued actuator targets and return every declared next-state tensor. Keep scene stepping, command generation, rewards, and episode decisions in the caller.
+For environments with an annotated observation method, export the original inference path with one call:
+
+```python
+from genesis.utils.leapp.environment import export_environment
+
+# env is freshly initialized; policy includes its existing inference normalization.
+bundle = export_environment(env, policy, "out/policy")
+```
+
+The exporter discovers the environment's named entities, external inputs, state attributes, and existing inference methods. It collects five samples by advancing the native environment between captures. Each capture runs on an owned copy of its tensor attributes, intercepting public getters and actuator setters. The original observation method and policy callable execute unchanged. No policy callback or parallel observation implementation is required.
+
+Annotate the environment's existing `get_observations` method with its inference boundaries:
+
+```python
+from genesis.utils.leapp import EnvironmentInput, TensorMetadata, policy_environment
+
+
+@policy_environment(
+    entities=("robot",),
+    inputs=(EnvironmentInput("command", "commands", semantics=TensorMetadata(system_axis=0)),),
+    state=("actions", "last_actions"),
+    prepare=("_update_buffers", "_update_observation", "_update_history"),
+    action="_apply_actions",
+)
+def get_observations(self):
+    return self.obs_buf  # Keep the environment's actual return type and body.
+```
+
+The `prepare` methods run in order before `policy(env.get_observations())`; `action` then processes the policy output and calls annotated actuator setters. Keep physics, reward computation, termination, reset, and command sampling outside these methods. The Go2 and drone examples extract these contiguous regions from their original `step` methods, preserving native execution order and in-place buffer writes. Their scene builders remain shared with the standalone launchers.
+
+The feedback boundary is immediately before observation construction. Both examples carry `actions` and `last_actions`: observations read their original history slot, then `_update_history` copies the previous action before the new policy output is processed. This preserves Go2's actuator delay and the drone's older observation action. Reset restores the exported initial values. Export a freshly initialized environment for its canonical initial state, or pass an explicit `initial_state={...}` when exporting an environment that has already stepped. A live snapshot is not necessarily the task's reset state.
+
+Optional `sample_inputs` gives callers control of sample collection; otherwise `capture_steps` defaults to five. The callback API below remains useful for standalone tensor pipelines that have no environment methods.
+
+## Export a standalone tensor pipeline
+
+For a standalone pipeline, implement one inference callback. Entity bindings supplied to it provide annotated public getters and control setters. Command tensors and feedback state are explicit inputs. Pass tensor-valued actuator targets and return every declared next-state tensor. Keep scene stepping, command generation, rewards, and episode decisions in the caller.
 
 ```python
 import torch

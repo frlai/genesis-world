@@ -6,8 +6,8 @@ from tensordict import TensorDict
 
 import genesis as gs
 from genesis.utils.geom import inv_quat, quat_to_xyz, transform_by_quat, transform_quat_by_quat
+from genesis.utils.leapp import EnvironmentInput, TensorMetadata, policy_environment
 
-from hover_policy import compute_observation, compute_targets
 from hover_scene import build_scene
 
 
@@ -82,8 +82,7 @@ class HoverEnv:
         )
 
     def step(self, actions):
-        self.actions, propellers_rpm = compute_targets(actions, clip_actions=self.env_cfg["clip_actions"])
-        self.drone.set_propellers_rpm(propellers_rpm)
+        self._apply_actions(actions)
         # update target pos
         if self.target is not None:
             self.target.set_pos(self.commands, zero_velocity=True)
@@ -91,17 +90,7 @@ class HoverEnv:
 
         # update buffers
         self.episode_length_buf += 1
-        self.last_base_pos[:] = self.base_pos[:]
-        self.base_pos[:] = self.drone.get_pos()
-        self.rel_pos = self.commands - self.base_pos
-        self.last_rel_pos = self.commands - self.last_base_pos
-        self.base_quat[:] = self.drone.get_quat()
-        self.base_euler = quat_to_xyz(
-            transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True
-        )
-        inv_base_quat = inv_quat(self.base_quat)
-        self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
-        self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
+        self._update_buffers()
 
         # resample commands
         envs_idx = self._at_target()
@@ -134,15 +123,60 @@ class HoverEnv:
         # compute observations
         self._update_observation()
 
-        self.last_actions[:] = self.actions[:]
+        self._update_history()
 
         return self.get_observations(), self.rew_buf, self.reset_buf, self.extras
 
+    def _apply_actions(self, actions):
+        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
+        exec_actions = self.actions
+
+        # 14468 is hover rpm
+        self.drone.set_propellers_rpm((1 + exec_actions * 0.8) * 14468.429183500699)
+
+    def _update_buffers(self):
+        self.last_base_pos[:] = self.base_pos[:]
+        self.base_pos[:] = self.drone.get_pos()
+        self.rel_pos = self.commands - self.base_pos
+        self.last_rel_pos = self.commands - self.last_base_pos
+        self.base_quat[:] = self.drone.get_quat()
+        self.base_euler = quat_to_xyz(
+            transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True
+        )
+        inv_base_quat = inv_quat(self.base_quat)
+        self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
+        self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
+
+    def _update_history(self):
+        self.last_actions[:] = self.actions[:]
+
     def _update_observation(self):
-        self.obs_buf = compute_observation(
-            self.rel_pos, self.base_quat, self.base_lin_vel, self.base_ang_vel, self.last_actions, self.obs_scales
+        self.obs_buf = torch.cat(
+            [
+                torch.clip(self.rel_pos * self.obs_scales["rel_pos"], -1, 1),
+                self.base_quat,
+                torch.clip(self.base_lin_vel * self.obs_scales["lin_vel"], -1, 1),
+                torch.clip(self.base_ang_vel * self.obs_scales["ang_vel"], -1, 1),
+                self.last_actions,
+            ],
+            axis=-1,
         )
 
+    @policy_environment(
+        entities=("drone",),
+        inputs=(
+            EnvironmentInput(
+                "command",
+                "commands",
+                semantics=TensorMetadata(
+                    kind="frame/position", system_axis=0, component_names=("x", "y", "z"), is_setpoint=True
+                ),
+            ),
+        ),
+        state=("actions", "last_actions"),
+        prepare=("_update_buffers", "_update_observation", "_update_history"),
+        action="_apply_actions",
+    )
     def get_observations(self):
         return TensorDict({"policy": self.obs_buf}, batch_size=[self.num_envs])
 

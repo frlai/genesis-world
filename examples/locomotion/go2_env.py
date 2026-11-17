@@ -5,8 +5,8 @@ from tensordict import TensorDict
 
 import genesis as gs
 from genesis.utils.geom import inv_quat, quat_to_xyz, transform_by_quat, transform_quat_by_quat
+from genesis.utils.leapp import EnvironmentInput, TensorMetadata, policy_environment
 
-from go2_policy import compute_observation, compute_targets
 from go2_scene import build_scene
 
 
@@ -117,30 +117,12 @@ class Go2Env:
             torch.where(envs_idx[:, None], commands, self.commands, out=self.commands)
 
     def step(self, actions):
-        self.actions, target_dof_pos = compute_targets(
-            actions,
-            self.last_actions,
-            self.default_dof_pos,
-            clip_actions=self.env_cfg["clip_actions"],
-            action_scale=self.env_cfg["action_scale"],
-            simulate_action_latency=self.simulate_action_latency,
-        )
-        self.robot.control_dofs_position(target_dof_pos[:, self.actions_dof_idx], slice(6, 18))
+        self._apply_actions(actions)
         self.scene.step()
 
         # update buffers
         self.episode_length_buf += 1
-        self.base_pos = self.robot.get_pos()
-        self.base_quat = self.robot.get_quat()
-        self.base_euler = quat_to_xyz(
-            transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True
-        )
-        inv_base_quat = inv_quat(self.base_quat)
-        self.base_lin_vel = transform_by_quat(self.robot.get_vel(), inv_base_quat)
-        self.base_ang_vel = transform_by_quat(self.robot.get_ang(), inv_base_quat)
-        self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
-        self.dof_pos = self.robot.get_dofs_position(self.motors_dof_idx)
-        self.dof_vel = self.robot.get_dofs_velocity(self.motors_dof_idx)
+        self._update_buffers()
 
         # compute reward
         self.rew_buf.zero_()
@@ -166,11 +148,52 @@ class Go2Env:
         # update observations
         self._update_observation()
 
-        self.last_actions.copy_(self.actions)
-        self.last_dof_vel.copy_(self.dof_vel)
+        self._update_history()
 
         return self.get_observations(), self.rew_buf, self.reset_buf, self.extras
 
+    def _apply_actions(self, actions):
+        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
+        exec_actions = self.last_actions if self.simulate_action_latency else self.actions
+        target_dof_pos = exec_actions * self.env_cfg["action_scale"] + self.default_dof_pos
+        self.robot.control_dofs_position(target_dof_pos[:, self.actions_dof_idx], slice(6, 18))
+
+    def _update_buffers(self):
+        self.base_pos = self.robot.get_pos()
+        self.base_quat = self.robot.get_quat()
+        self.base_euler = quat_to_xyz(
+            transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True
+        )
+        inv_base_quat = inv_quat(self.base_quat)
+        self.base_lin_vel = transform_by_quat(self.robot.get_vel(), inv_base_quat)
+        self.base_ang_vel = transform_by_quat(self.robot.get_ang(), inv_base_quat)
+        self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
+        self.dof_pos = self.robot.get_dofs_position(self.motors_dof_idx)
+        self.dof_vel = self.robot.get_dofs_velocity(self.motors_dof_idx)
+
+    def _update_history(self):
+        self.last_actions.copy_(self.actions)
+        self.last_dof_vel.copy_(self.dof_vel)
+
+    @policy_environment(
+        entities=("robot",),
+        inputs=(
+            EnvironmentInput(
+                "command",
+                "commands",
+                semantics=TensorMetadata(
+                    kind="frame/twist",
+                    system_axis=0,
+                    component_names=("x", "y", "angular_z"),
+                    expressed_in="robot/base",
+                    is_setpoint=True,
+                ),
+            ),
+        ),
+        state=("actions", "last_actions"),
+        prepare=("_update_buffers", "_update_observation", "_update_history"),
+        action="_apply_actions",
+    )
     def get_observations(self):
         return TensorDict({"policy": self.obs_buf}, batch_size=[self.num_envs])
 
@@ -226,16 +249,16 @@ class Go2Env:
         self._resample_commands(envs_idx)
 
     def _update_observation(self):
-        self.obs_buf = compute_observation(
-            self.base_ang_vel,
-            self.projected_gravity,
-            self.commands,
-            self.dof_pos,
-            self.dof_vel,
-            self.actions,
-            self.default_dof_pos,
-            self.obs_scales,
-            self.commands_scale,
+        self.obs_buf = torch.concatenate(
+            (
+                self.base_ang_vel * self.obs_scales["ang_vel"],
+                self.projected_gravity,
+                self.commands * self.commands_scale,
+                (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],
+                self.dof_vel * self.obs_scales["dof_vel"],
+                self.actions,
+            ),
+            dim=-1,
         )
 
     def reset(self):

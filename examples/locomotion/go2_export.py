@@ -1,6 +1,7 @@
 """Export a trained walking policy with its observation and actuator computations."""
 
 import argparse
+import copy
 import json
 import pickle
 from pathlib import Path
@@ -12,11 +13,14 @@ from rsl_rl.runners import OnPolicyRunner
 import genesis as gs
 from genesis.utils.geom import inv_quat, transform_by_quat
 from genesis.utils.leapp.deployment import LeappDeployment
-from genesis.utils.leapp.export import export_policy
-from genesis.utils.leapp.types import TensorMetadata
+from genesis.utils.leapp.environment import export_environment
 
 from go2_env import Go2Env
-from go2_policy import compute_observation, compute_targets
+
+
+class _ActuatorRecorder:
+    def control_dofs_position(self, targets, dofs_idx_local):
+        self.targets = targets
 
 
 def main():
@@ -41,61 +45,13 @@ def main():
     runner.load(str(log_dir / f"model_{args.ckpt}.pt"))
     policy = runner.get_inference_policy(device=gs.device)
 
-    def policy_step(entities, inputs, state):
-        robot = entities["robot"]
-        inv_base_quat = inv_quat(robot.get_quat())
-        observation = compute_observation(
-            transform_by_quat(robot.get_ang(), inv_base_quat),
-            transform_by_quat(env.global_gravity, inv_base_quat),
-            inputs["command"],
-            robot.get_dofs_position(env.motors_dof_idx),
-            robot.get_dofs_velocity(env.motors_dof_idx),
-            state["previous_actions"],
-            env.default_dof_pos,
-            env.obs_scales,
-            env.commands_scale,
-        )
-        actions, targets = compute_targets(
-            policy({"policy": observation}),
-            state["previous_actions"],
-            env.default_dof_pos,
-            clip_actions=env_cfg["clip_actions"],
-            action_scale=env_cfg["action_scale"],
-            simulate_action_latency=env.simulate_action_latency,
-        )
-        robot.control_dofs_position(targets[:, env.actions_dof_idx], slice(6, 18))
-        return {"previous_actions": actions}
-
     def reset_scene():
         env.reset()
         # Synchronize public getters with the initial buffers populated by the training environment
         env.robot.set_qpos(env.init_qpos, zero_velocity=True)
 
-    def samples():
-        for speed in (0.5, 0.3, 0.6, 0.4, 0.5):
-            env.commands[:, 0] = speed
-            env._update_observation()
-            yield {"command": env.commands.clone()}
-            env.step(policy(env.get_observations()))
-
     with torch.no_grad():
-        bundle = export_policy(
-            policy_step,
-            {"robot": env.robot},
-            samples(),
-            {"previous_actions": torch.zeros_like(env.actions)},
-            args.output_dir,
-            step_dt=env.dt,
-            input_semantics={
-                "command": TensorMetadata(
-                    kind="frame/twist",
-                    system_axis=0,
-                    component_names=("x", "y", "angular_z"),
-                    expressed_in="robot/base",
-                    is_setpoint=True,
-                )
-            },
-        )
+        bundle = export_environment(env, policy, args.output_dir)
         (bundle.parent / "scene.json").write_text(json.dumps(env_cfg, indent=2) + "\n")
         deployment = LeappDeployment(env.scene, bundle, {"robot": env.robot}, reset_callback=reset_scene)
         deployment.reset()
@@ -107,25 +63,23 @@ def main():
             env.commands[:, 0] = 0.25 if i_step % 20 < 10 else 0.5
             env._update_observation()
             actions = policy(env.get_observations())
-            _, targets = compute_targets(
-                actions,
-                env.last_actions,
-                env.default_dof_pos,
-                clip_actions=env_cfg["clip_actions"],
-                action_scale=env_cfg["action_scale"],
-                simulate_action_latency=env.simulate_action_latency,
-            )
+            reference = copy.copy(env)
+            reference.robot = _ActuatorRecorder()
+            reference._apply_actions(actions)
             outputs = deployment.inference.run_policy(deployment.read_inputs({"command": env.commands}))
             actual = outputs[deployment.inference.outputs[0]]
-            expected = targets[:, env.actions_dof_idx].to(actual.device)
+            expected = reference.robot.targets.to(actual.device)
             error_max = max(error_max, (actual - expected).abs().max().item())
             torch.testing.assert_close(actual, expected, rtol=0, atol=2e-6)
-            feedback = deployment.inference.value_dict["policy"]["state_previous_actions_in"]
-            expected_actions = torch.clip(actions, -env_cfg["clip_actions"], env_cfg["clip_actions"]).to(
-                feedback.device
-            )
-            state_error_max = max(state_error_max, (feedback - expected_actions).abs().max().item())
-            torch.testing.assert_close(feedback, expected_actions, rtol=0, atol=1e-5)
+            feedback = deployment.inference.value_dict["policy"]
+            for key, expected_state in (
+                ("state_actions_in", reference.actions),
+                ("state_last_actions_in", env.actions),
+            ):
+                actual_state = feedback[key]
+                expected_state = expected_state.to(actual_state.device)
+                state_error_max = max(state_error_max, (actual_state - expected_state).abs().max().item())
+                torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=1e-5)
             env.step(actions)
             if env.reset_buf.any():
                 deployment.reset()
