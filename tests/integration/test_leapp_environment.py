@@ -223,3 +223,17 @@ def test_environment_rejects_cached_state_views(tmp_path, policy):
     assert_equal(env.history, history)
     assert env.events == []
     assert_equal(env.scene.get_time(), 0)
+
+    env.buffers["previous_actions"] = env.previous_actions
+
+    def samples():
+        yield {"command": env.commands, "time": env.elapsed_s}
+        env.buffers["previous_actions"] = env.previous_actions.view_as(env.previous_actions)
+        yield {"command": env.commands, "time": env.elapsed_s}
+
+    with pytest.raises(ValueError, match="share storage"):
+        export_environment(env, policy, tmp_path, sample_inputs=samples())
+    assert_equal(env.previous_actions, previous)
+    assert_equal(env.history, history)
+    assert env.events == []
+    assert_equal(env.scene.get_time(), 0)
