@@ -25,6 +25,15 @@ class TensorMetadata:
 
 
 @dataclass(frozen=True)
+class EnvironmentInput:
+    """Bind a named external policy input to an environment tensor attribute."""
+
+    name: str
+    attribute: str
+    semantics: TensorMetadata = TensorMetadata()
+
+
+@dataclass(frozen=True)
 class CallArgument:
     name: str
     value: bool | int | float | str | list[int] | None

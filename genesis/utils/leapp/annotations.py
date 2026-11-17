@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from genesis.utils.misc import _BuildGuard
 
-from .types import TensorMetadata
+from .types import EnvironmentInput, TensorMetadata
 
 
 @dataclass(frozen=True)
@@ -57,3 +57,40 @@ def get_boundary(entity, method_name: str) -> Boundary:
         return _BOUNDARIES[function]
     except KeyError:
         raise ValueError(f"{type(entity).__name__}.{method_name} has no policy export boundary annotation.") from None
+
+
+@dataclass(frozen=True)
+class PolicyEnvironment:
+    entities: tuple[str, ...]
+    inputs: tuple[EnvironmentInput, ...]
+    state: tuple[str, ...]
+    prepare: tuple[str, ...]
+    action: str
+    step_dt: str
+
+
+_ENVIRONMENTS = {}
+
+
+def policy_environment(*, entities, inputs=(), state=(), prepare=(), action, step_dt="dt"):
+    """Describe original inference methods on ``get_observations`` without changing execution.
+
+    ``prepare`` lists methods run before the observation getter, including any history update that ordinarily follows
+    observation construction. ``action`` processes one policy action and writes actuator targets, without physics.
+    Entity, external input and feedback attributes are replaced only on export-owned environment snapshots.
+    """
+    metadata = PolicyEnvironment(tuple(entities), tuple(inputs), tuple(state), tuple(prepare), action, step_dt)
+
+    def decorate(function):
+        _ENVIRONMENTS[function] = metadata
+        return function
+
+    return decorate
+
+
+def get_policy_environment(env) -> PolicyEnvironment:
+    function = inspect.unwrap(inspect.getattr_static(type(env), "get_observations"), stop=_ENVIRONMENTS.__contains__)
+    try:
+        return _ENVIRONMENTS[function]
+    except KeyError:
+        raise ValueError("Environment get_observations must have a policy_environment annotation.") from None
