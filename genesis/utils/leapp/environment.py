@@ -43,6 +43,32 @@ def _snapshot(value, memo):
     return copy.deepcopy(value, memo)
 
 
+def _validate_snapshot(env):
+    pending = list(vars(env).items())
+    visited = set()
+    storage_owners = {}
+    while pending:
+        path, value = pending.pop()
+        if id(value) in visited:
+            continue
+        visited.add(id(value))
+        if isinstance(value, torch.Tensor) and value.layout == torch.strided:
+            storage = value.untyped_storage()
+            if storage.nbytes() == 0:
+                continue
+            key = (value.device, storage.data_ptr())
+            if key in storage_owners:
+                raise ValueError(
+                    f"Environment tensors '{storage_owners[key]}' and '{path}' share storage. Store one tensor and "
+                    "create its views inside the annotated inference methods instead of caching distinct views."
+                )
+            storage_owners[key] = path
+        elif isinstance(value, dict):
+            pending.extend((f"{path}[{key!r}]", item) for key, item in value.items())
+        elif isinstance(value, (list, tuple)):
+            pending.extend((f"{path}[{index}]", item) for index, item in enumerate(value))
+
+
 def export_environment(
     env,
     policy,
@@ -61,6 +87,8 @@ def export_environment(
     followed by ``policy(env.get_observations())`` and the declared action method. Capture uses fresh owned copies of
     tensor attributes and ordinary tensor containers, replacing entity attributes with export adapters. Other custom
     objects are shared read-only; inference methods must not mutate them or invoke physics, resets or command sampling.
+    Repeated references to the same tensor are supported. Distinct cached tensor views sharing storage are rejected;
+    construct views inside the original inference methods so their relationship is traced.
 
     Initialize the environment before exporting: its declared state attributes provide deployment reset values unless
     ``initial_state`` is supplied. State updates, including in-place history writes, remain inside the original methods.
@@ -71,6 +99,7 @@ def export_environment(
     collection; its mappings must contain exactly the declared external names and may advance the scene between yields.
     """
     metadata = get_policy_environment(env)
+    _validate_snapshot(env)
     entities = {attribute: getattr(env, attribute) for attribute in metadata.entities}
     inputs = {item.name: item for item in metadata.inputs}
     if len(inputs) != len(metadata.inputs) or len({item.attribute for item in metadata.inputs}) != len(metadata.inputs):
@@ -103,6 +132,7 @@ def export_environment(
             yield _snapshot(sample, {})
 
     def step(adapters, external, state):
+        _validate_snapshot(env)
         owned = copy.copy(env)
         scene = next(iter(entities.values())).scene
         memo = {id(env): owned, id(scene): _CaptureScene()}
