@@ -3,6 +3,8 @@
 import inspect
 from dataclasses import dataclass
 
+from genesis.utils.misc import _BuildGuard
+
 from .types import TensorMetadata
 
 
@@ -24,7 +26,7 @@ def tensor_input(*, kind=None, component_names=None, unit=None, expressed_in=Non
     )
 
     def decorate(function):
-        _BOUNDARIES[function] = boundary
+        _BOUNDARIES[function.member if isinstance(function, _BuildGuard) else function] = boundary
         return function
 
     return decorate
@@ -39,7 +41,7 @@ def tensor_output(*, value_parameter, kind=None, unit=None, selection=None):
     )
 
     def decorate(function):
-        _BOUNDARIES[function] = boundary
+        _BOUNDARIES[function.member if isinstance(function, _BuildGuard) else function] = boundary
         return function
 
     return decorate
@@ -50,7 +52,7 @@ def get_boundary(entity, method_name: str) -> Boundary:
 
     Reflection is confined to this extensible boundary registry. Unannotated attributes cannot become frozen inputs.
     """
-    function = inspect.unwrap(inspect.getattr_static(type(entity), method_name))
+    function = inspect.unwrap(inspect.getattr_static(type(entity), method_name), stop=_BOUNDARIES.__contains__)
     try:
         return _BOUNDARIES[function]
     except KeyError:

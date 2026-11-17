@@ -9,7 +9,9 @@ import torch
 import genesis as gs
 from genesis.utils.geom import inv_quat, transform_by_quat
 from genesis.utils.leapp import TensorMetadata, tensor_input
+from genesis.utils.leapp.annotations import get_boundary
 from genesis.utils.leapp.types import dof_names, load_metadata
+from genesis.utils.misc import BuildableMixin
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -155,8 +157,8 @@ def test_complete_policy_export(tmp_path, n_envs, external_command, record_prope
                 error_target_max, (target_actual - target.to(target_actual.device)).abs().max().item()
             )
             error_state_max = max(error_state_max, (state_actual - previous.to(state_actual.device)).abs().max().item())
-            assert_allclose(target_actual, target, tol=2e-7)
-            assert_allclose(state_actual, previous, tol=5e-7)
+            assert_allclose(target_actual, target, tol=1e-7)
+            assert_allclose(state_actual, previous, tol=2e-7)
     record_property("error_target_max", error_target_max)
     record_property("error_state_max", error_state_max)
 
@@ -169,6 +171,25 @@ def test_annotation_preserves_execution():
     annotated = tensor_input(kind="joint/position")(getter)
     assert annotated is getter
     assert_equal(annotated(3), 5)
+
+    class Entity(BuildableMixin):
+        _is_built = True
+
+        @tensor_input(kind="joint/position")
+        @gs.assert_built
+        def outer(self, value):
+            return value + 2
+
+        @gs.assert_built
+        @tensor_input(kind="joint/velocity")
+        def inner(self, value):
+            return value + 3
+
+    entity = Entity()
+    assert get_boundary(entity, "outer").metadata.kind == "joint/position"
+    assert get_boundary(entity, "inner").metadata.kind == "joint/velocity"
+    assert_equal(entity.outer(1), 3)
+    assert_equal(entity.inner(1), 4)
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(gs.__file__.rsplit("/genesis/", 1)[0])
     process = subprocess.run(
