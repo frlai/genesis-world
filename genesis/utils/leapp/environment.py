@@ -8,13 +8,58 @@ from types import MethodType
 import numpy as np
 import torch
 
-from .annotations import get_policy_environment
+from .annotations import get_boundary, get_policy_environment
 from .export import export_policy
 
 
-class _CaptureScene:
+class _CaptureComplete(Exception):
+    pass
+
+
+class _UnavailableObject:
+    def __init__(self, type_name):
+        self.type_name = type_name
+
     def __getattr__(self, name):
-        raise ValueError("Environment inference stages cannot access the scene. Keep physics outside capture.")
+        raise ValueError(f"{self.type_name}.{name} is not a declared environment export boundary.")
+
+
+class _CaptureScene:
+    def __init__(self, scene, begin_observation):
+        self.scene = scene
+        self.begin_observation = begin_observation
+        self.observing = False
+
+    def step(self, *args, **kwargs):
+        if self.observing:
+            raise _CaptureComplete()
+        self.observing = True
+        self.begin_observation()
+
+    def get_error_envs_mask(self):
+        return self.scene.get_error_envs_mask().clone()
+
+    def __getattr__(self, name):
+        raise ValueError(f"Scene.{name} is not supported during environment export.")
+
+
+class _CaptureEntity:
+    def __init__(self, entity, adapter, scene):
+        self.entity = entity
+        self.adapter = adapter
+        self.scene = scene
+
+    def __getattr__(self, name):
+        boundary = get_boundary(self.entity, name)
+        if self.scene.observing:
+            return getattr(self.adapter, name)
+        if boundary.value_parameter is None:
+            return getattr(self.entity, name)
+        return _skip
+
+
+def _skip(*args, **kwargs):
+    return None
 
 
 def _snapshot(value, memo):
@@ -38,6 +83,8 @@ def _snapshot(value, memo):
             pending.extend(item)
         elif isinstance(item, MethodType) and id(item.__self__) in memo:
             memo[identity] = MethodType(item.__func__, memo[id(item.__self__)])
+        elif type(item).__module__.startswith("genesis.") and type(item).__module__ != __name__:
+            memo[identity] = _UnavailableObject(type(item).__name__)
         else:
             memo[identity] = item
     return copy.deepcopy(value, memo)
@@ -81,22 +128,27 @@ def export_environment(
     rtol: float = 1e-4,
     atol: float = 1e-5,
 ) -> Path:
-    """Export the original annotated observation, inference and actuator methods as one ONNX model.
+    """Export the original environment step and policy as one ONNX model.
 
-    ``env.get_observations`` must carry ``@policy_environment``. Its ``prepare`` methods run in declared order,
-    followed by ``policy(env.get_observations())`` and the declared action method. Capture uses fresh owned copies of
-    tensor attributes and ordinary tensor containers, replacing entity attributes with export adapters. Other custom
-    objects are shared read-only; inference methods must not mutate them or invoke physics, resets or command sampling.
-    Repeated references to the same tensor are supported. Distinct cached tensor views sharing storage are rejected;
-    construct views inside the original inference methods so their relationship is traced.
+    ``env.get_observations`` must carry ``@policy_environment``. Capture runs ``env.step`` on an owned snapshot,
+    discarding its initial actuator writes and intercepting its single ``scene.step`` call. At that boundary, declared
+    external inputs and feedback are injected; original observation and history computations then execute normally.
+    The policy consumes the returned observations. A second original ``step`` captures action processing and stops at
+    the physics boundary. No capture pass advances physics or writes to live entities.
 
-    Initialize the environment before exporting: its declared state attributes provide deployment reset values unless
-    ``initial_state`` is supplied. State updates, including in-place history writes, remain inside the original methods.
-    The policy callable must include inference normalization and expose any persistent tensor state explicitly.
+    ``skip`` methods are disabled only on the owned snapshot to exclude command sampling and episode resets. Tensor
+    attributes and ordinary containers are copied; other custom objects are shared read-only. Unbound Genesis objects
+    cannot be accessed. Repeated references to one tensor are supported, but distinct cached views sharing storage are
+    rejected. Views created inside ``step`` remain traced. A native step must call ``scene.step`` exactly once and
+    return observations, either directly or as the first tuple item.
+
+    Initialize the environment before export. Declared state attributes supply deployment reset values unless
+    ``initial_state`` is given; these values represent the boundary immediately after physics, before observations and
+    history updates. The policy callable must include normalization and expose any persistent tensor state explicitly.
 
     By default, collect ``capture_steps`` samples, advancing the original environment with its ordinary policy/step
-    between samples. This changes its simulation state. An explicit ``sample_inputs`` iterable instead controls sample
-    collection; its mappings must contain exactly the declared external names and may advance the scene between yields.
+    between samples. This changes its simulation state. An explicit ``sample_inputs`` iterable controls collection
+    instead; its mappings must contain exactly the declared external names and may advance the scene between yields.
     """
     metadata = get_policy_environment(env)
     _validate_snapshot(env)
@@ -134,18 +186,50 @@ def export_environment(
     def step(adapters, external, state):
         _validate_snapshot(env)
         owned = copy.copy(env)
+        attributes_before_step = {}
+
+        def begin_observation():
+            injected = _snapshot(state, {})
+            injected.update((inputs[name].attribute, value) for name, value in _snapshot(external, {}).items())
+            memo = {id(owned): owned}
+            for attribute, value in injected.items():
+                memo[id(attributes_before_step[attribute])] = value
+                memo[id(getattr(owned, attribute))] = value
+            owned.__dict__ = _snapshot(vars(owned), memo)
+
         scene = next(iter(entities.values())).scene
-        memo = {id(env): owned, id(scene): _CaptureScene()}
-        memo.update((id(entities[name]), adapter) for name, adapter in adapters.items())
-        injected = _snapshot(state, {})
-        injected.update((inputs[name].attribute, value) for name, value in _snapshot(external, {}).items())
-        memo.update((id(getattr(env, attribute)), value) for attribute, value in injected.items())
-        owned.__dict__ = {attribute: _snapshot(value, memo) for attribute, value in vars(env).items()}
-        for method_name in metadata.prepare:
-            getattr(owned, method_name)()
-        actions = policy(owned.get_observations())
-        getattr(owned, metadata.action)(actions)
-        return {attribute: getattr(owned, attribute) for attribute in metadata.state}
+        capture_scene = _CaptureScene(scene, begin_observation)
+        memo = {id(env): owned, id(scene): capture_scene}
+        memo.update((id(entity), _UnavailableObject(type(entity).__name__)) for entity in scene.entities)
+        memo.update(
+            (id(entities[name]), _CaptureEntity(entities[name], adapter, capture_scene))
+            for name, adapter in adapters.items()
+        )
+        owned.__dict__ = _snapshot(vars(env), memo)
+        attributes_before_step.update(
+            (attribute, getattr(owned, attribute))
+            for attribute in (*state, *(item.attribute for item in inputs.values()))
+        )
+        for method_name in metadata.skip:
+            setattr(owned, method_name, _skip)
+        action_template = getattr(owned, metadata.action)
+        if not isinstance(action_template, torch.Tensor):
+            raise TypeError("The annotated environment action attribute must be a Torch tensor.")
+        try:
+            result = owned.step(torch.zeros_like(action_template))
+        except _CaptureComplete:
+            raise ValueError("Native environment step must call scene.step exactly once.") from None
+        if not capture_scene.observing:
+            raise ValueError("Native environment step must call scene.step exactly once.")
+        observations = result[0] if isinstance(result, tuple) else result
+        if observations is None:
+            raise ValueError("Native environment step must return policy observations.")
+        actions = policy(observations)
+        try:
+            owned.step(actions)
+        except _CaptureComplete:
+            return {attribute: getattr(owned, attribute) for attribute in metadata.state}
+        raise ValueError("Native action processing did not reach the scene.step boundary.")
 
     return export_policy(
         step,
