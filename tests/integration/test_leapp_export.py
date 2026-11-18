@@ -282,30 +282,23 @@ def test_environment_collects_native_samples(tmp_path):
         def observe(self):
             self.observation.copy_(self.position + self.command + self.aliases["previous"])
 
-        def history(self):
-            self.previous.copy_(self.actions)
-
         @policy_environment(
             entities=("robot",),
             inputs=(EnvironmentInput("command", "command"),),
             state=("actions", "previous"),
-            prepare=("read", "observe", "history"),
-            action="apply",
+            action="actions",
         )
         def get_observations(self):
             return TensorDict({"policy": self.observation}, batch_size=[1])
 
-        def apply(self, actions):
+        def step(self, actions):
             self.actions.copy_(torch.clip(actions, -0.5, 0.5))
             self.robot.control_dofs_force(self.actions * 0.1)
             self.events.append("action")
-
-        def step(self, actions):
-            self.apply(actions)
             self.scene.step()
-            self.read()
-            self.observe()
-            self.history()
+            self.position = self.robot.get_dofs_position()
+            self.observation.copy_(self.position + self.command + self.aliases["previous"])
+            self.previous.copy_(self.actions)
             return self.get_observations()
 
     def policy(observations):
