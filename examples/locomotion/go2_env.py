@@ -4,10 +4,8 @@ import torch
 from tensordict import TensorDict
 
 import genesis as gs
-from genesis.utils.geom import inv_quat, quat_to_xyz, transform_by_quat, transform_quat_by_quat
 from genesis.utils.leapp import EnvironmentInput, TensorMetadata, policy_environment
-
-from go2_scene import build_scene
+from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
 
 
 def gs_rand(lower, upper, batch_shape):
@@ -35,7 +33,46 @@ class Go2Env:
         self.obs_scales: dict[str, float] = obs_cfg["obs_scales"]
         self.reward_scales: dict[str, float] = reward_cfg["reward_scales"]
 
-        self.scene, self.robot = build_scene(self.env_cfg, num_envs=num_envs, dt=self.dt, show_viewer=show_viewer)
+        self.scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=self.dt,
+                substeps=2,
+            ),
+            rigid_options=gs.options.RigidOptions(
+                enable_self_collision=False,
+                # For this locomotion policy, there are usually no more than 20 collision pairs. Setting a low value
+                # can save memory. Violating this condition will raise an exception.
+                max_collision_pairs=20,
+                tolerance=1e-5,
+            ),
+            vis_options=gs.options.VisOptions(
+                rendered_envs_idx=[0],
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(2.0, 0.0, 2.5),
+                camera_lookat=(0.0, 0.0, 0.5),
+                camera_fov=40,
+            ),
+            show_viewer=show_viewer,
+        )
+
+        # add plain
+        self.scene.add_entity(
+            gs.morphs.URDF(
+                file="urdf/plane/plane.urdf",
+                fixed=True,
+            )
+        )
+
+        self.robot = self.scene.add_entity(
+            gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+                pos=self.env_cfg["base_init_pos"],
+                quat=self.env_cfg["base_init_quat"],
+            ),
+        )
+
+        self.scene.build(n_envs=num_envs)
 
         # names to indices
         self.motors_dof_idx = torch.tensor(
@@ -117,12 +154,25 @@ class Go2Env:
             torch.where(envs_idx[:, None], commands, self.commands, out=self.commands)
 
     def step(self, actions):
-        self._apply_actions(actions)
+        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
+        exec_actions = self.last_actions if self.simulate_action_latency else self.actions
+        target_dof_pos = exec_actions * self.env_cfg["action_scale"] + self.default_dof_pos
+        self.robot.control_dofs_position(target_dof_pos[:, self.actions_dof_idx], slice(6, 18))
         self.scene.step()
 
         # update buffers
         self.episode_length_buf += 1
-        self._update_buffers()
+        self.base_pos = self.robot.get_pos()
+        self.base_quat = self.robot.get_quat()
+        self.base_euler = quat_to_xyz(
+            transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True
+        )
+        inv_base_quat = inv_quat(self.base_quat)
+        self.base_lin_vel = transform_by_quat(self.robot.get_vel(), inv_base_quat)
+        self.base_ang_vel = transform_by_quat(self.robot.get_ang(), inv_base_quat)
+        self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
+        self.dof_pos = self.robot.get_dofs_position(self.motors_dof_idx)
+        self.dof_vel = self.robot.get_dofs_velocity(self.motors_dof_idx)
 
         # compute reward
         self.rew_buf.zero_()
@@ -148,32 +198,10 @@ class Go2Env:
         # update observations
         self._update_observation()
 
-        self._update_history()
-
-        return self.get_observations(), self.rew_buf, self.reset_buf, self.extras
-
-    def _apply_actions(self, actions):
-        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
-        exec_actions = self.last_actions if self.simulate_action_latency else self.actions
-        target_dof_pos = exec_actions * self.env_cfg["action_scale"] + self.default_dof_pos
-        self.robot.control_dofs_position(target_dof_pos[:, self.actions_dof_idx], slice(6, 18))
-
-    def _update_buffers(self):
-        self.base_pos = self.robot.get_pos()
-        self.base_quat = self.robot.get_quat()
-        self.base_euler = quat_to_xyz(
-            transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True
-        )
-        inv_base_quat = inv_quat(self.base_quat)
-        self.base_lin_vel = transform_by_quat(self.robot.get_vel(), inv_base_quat)
-        self.base_ang_vel = transform_by_quat(self.robot.get_ang(), inv_base_quat)
-        self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
-        self.dof_pos = self.robot.get_dofs_position(self.motors_dof_idx)
-        self.dof_vel = self.robot.get_dofs_velocity(self.motors_dof_idx)
-
-    def _update_history(self):
         self.last_actions.copy_(self.actions)
         self.last_dof_vel.copy_(self.dof_vel)
+
+        return self.get_observations(), self.rew_buf, self.reset_buf, self.extras
 
     @policy_environment(
         entities=("robot",),
@@ -191,8 +219,8 @@ class Go2Env:
             ),
         ),
         state=("actions", "last_actions"),
-        prepare=("_update_buffers", "_update_observation", "_update_history"),
-        action="_apply_actions",
+        action="actions",
+        skip=("_reset_idx", "_resample_commands"),
     )
     def get_observations(self):
         return TensorDict({"policy": self.obs_buf}, batch_size=[self.num_envs])
@@ -251,12 +279,12 @@ class Go2Env:
     def _update_observation(self):
         self.obs_buf = torch.concatenate(
             (
-                self.base_ang_vel * self.obs_scales["ang_vel"],
-                self.projected_gravity,
-                self.commands * self.commands_scale,
-                (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],
-                self.dof_vel * self.obs_scales["dof_vel"],
-                self.actions,
+                self.base_ang_vel * self.obs_scales["ang_vel"],  # 3
+                self.projected_gravity,  # 3
+                self.commands * self.commands_scale,  # 3
+                (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],  # 12
+                self.dof_vel * self.obs_scales["dof_vel"],  # 12
+                self.actions,  # 12
             ),
             dim=-1,
         )

@@ -17,9 +17,14 @@ from genesis.utils.leapp.environment import export_environment
 from hover_env import HoverEnv
 
 
+class _TargetCaptured(Exception):
+    pass
+
+
 class _ActuatorRecorder:
     def set_propellers_rpm(self, targets):
         self.targets = targets
+        raise _TargetCaptured
 
 
 def main():
@@ -47,6 +52,8 @@ def main():
     with torch.no_grad():
         bundle = export_environment(env, policy, args.output_dir)
         (bundle.parent / "scene.json").write_text(json.dumps(env_cfg, indent=2) + "\n")
+        env.scene.export(bundle.parent / "scene.gscene")
+        (bundle.parent / "bindings.json").write_text(json.dumps({"drone": env.drone.name}, indent=2) + "\n")
         deployment = LeappDeployment(env.scene, bundle, {"drone": env.drone}, reset_callback=env.reset)
         deployment.reset()
         command_snapshot = env.commands.clone()
@@ -61,7 +68,10 @@ def main():
             actions = policy(env.get_observations())
             reference = copy.copy(env)
             reference.drone = _ActuatorRecorder()
-            reference._apply_actions(actions)
+            try:
+                reference.step(actions)
+            except _TargetCaptured:
+                pass
             expected = reference.drone.targets
             outputs = deployment.inference.run_policy(deployment.read_inputs({"command": command_snapshot}))
             actual = outputs[deployment.inference.outputs[0]]

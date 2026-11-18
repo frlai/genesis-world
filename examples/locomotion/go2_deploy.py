@@ -10,8 +10,6 @@ import genesis as gs
 from genesis.utils.geom import inv_quat, quat_to_xyz, transform_by_quat, transform_quat_by_quat
 from genesis.utils.leapp.deployment import LeappDeployment
 
-from go2_scene import build_scene
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -30,7 +28,10 @@ def main():
 
     gs.init(backend=gs.gpu if args.gpu else gs.cpu, precision="32", seed=1, logging_level="warning")
     env_cfg = json.loads((args.bundle.parent / "scene.json").read_text())
-    scene, robot = build_scene(env_cfg, num_envs=1, dt=0.02, show_viewer=args.vis)
+    bindings = json.loads((args.bundle.parent / "bindings.json").read_text())
+    scene = gs.Scene.load(args.bundle.parent / "scene.gscene", show_viewer=args.vis)
+    scene.build(n_envs=1)
+    robot = scene.get_entity(bindings["robot"])
     initial_position = [env_cfg["default_joint_angles"][joint.name] for joint in robot.joints[1:]]
     initial_qpos = [*env_cfg["base_init_pos"], *env_cfg["base_init_quat"], *initial_position]
 

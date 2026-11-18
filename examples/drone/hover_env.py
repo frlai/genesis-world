@@ -1,14 +1,16 @@
-import copy
-import math
-
 import torch
+import math
+import copy
 from tensordict import TensorDict
 
 import genesis as gs
-from genesis.utils.geom import inv_quat, quat_to_xyz, transform_by_quat, transform_quat_by_quat
 from genesis.utils.leapp import EnvironmentInput, TensorMetadata, policy_environment
-
-from hover_scene import build_scene
+from genesis.utils.geom import (
+    quat_to_xyz,
+    transform_by_quat,
+    inv_quat,
+    transform_quat_by_quat,
+)
 
 
 def gs_rand_float(lower, upper, shape, device):
@@ -36,12 +38,66 @@ class HoverEnv:
         self.obs_scales = obs_cfg["obs_scales"]
         self.reward_scales = copy.deepcopy(reward_cfg["reward_scales"])
 
+        self.scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=self.dt,
+            ),
+            rigid_options=gs.options.RigidOptions(
+                dt=self.dt / 2,
+                enable_collision=True,
+                enable_joint_limit=True,
+                constraint_solver=gs.constraint_solver.Newton,
+            ),
+            vis_options=gs.options.VisOptions(
+                rendered_envs_idx=list(range(self.rendered_env_num)),
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(3.0, 0.0, 3.0),
+                camera_lookat=(0.0, 0.0, 1.0),
+                camera_fov=40,
+            ),
+            show_viewer=show_viewer,
+        )
+
+        self.scene.add_entity(gs.morphs.Plane())
+
+        if self.env_cfg["visualize_target"]:
+            self.target = self.scene.add_entity(
+                morph=gs.morphs.Mesh(
+                    file="meshes/sphere.obj",
+                    scale=0.05,
+                    fixed=False,
+                    collision=False,
+                ),
+                surface=gs.surfaces.Rough(
+                    diffuse_texture=gs.textures.ColorTexture(
+                        color=(1.0, 0.5, 0.5),
+                    ),
+                ),
+            )
+        else:
+            self.target = None
+
+        if self.env_cfg["visualize_camera"]:
+            self.cam = self.scene.add_camera(
+                res=(640, 480),
+                pos=(3.5, 0.0, 2.5),
+                lookat=(0, 0, 0.5),
+                fov=30,
+                GUI=True,
+            )
+
+        # add drone
         self.base_init_pos = torch.tensor(self.env_cfg["base_init_pos"], device=gs.device)
         self.base_init_quat = torch.tensor(self.env_cfg["base_init_quat"], device=gs.device)
         self.inv_base_init_quat = inv_quat(self.base_init_quat)
-        self.scene, self.drone, self.target, self.cam = build_scene(
-            self.env_cfg, num_envs=num_envs, dt=self.dt, show_viewer=show_viewer
+        self.drone = self.scene.add_entity(
+            morph=gs.morphs.Drone(
+                file="urdf/drones/cf2x.urdf",
+            )
         )
+
+        self.scene.build(n_envs=num_envs)
 
         # prepare reward functions and multiply reward scales by dt
         self.reward_functions, self.episode_sums = dict(), dict()
@@ -82,7 +138,11 @@ class HoverEnv:
         )
 
     def step(self, actions):
-        self._apply_actions(actions)
+        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
+        exec_actions = self.actions
+
+        # 14468 is hover rpm
+        self.drone.set_propellers_rpm((1 + exec_actions * 0.8) * 14468.429183500699)
         # update target pos
         if self.target is not None:
             self.target.set_pos(self.commands, zero_velocity=True)
@@ -90,7 +150,17 @@ class HoverEnv:
 
         # update buffers
         self.episode_length_buf += 1
-        self._update_buffers()
+        self.last_base_pos[:] = self.base_pos[:]
+        self.base_pos[:] = self.drone.get_pos()
+        self.rel_pos = self.commands - self.base_pos
+        self.last_rel_pos = self.commands - self.last_base_pos
+        self.base_quat[:] = self.drone.get_quat()
+        self.base_euler = quat_to_xyz(
+            transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True
+        )
+        inv_base_quat = inv_quat(self.base_quat)
+        self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
+        self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
 
         # resample commands
         envs_idx = self._at_target()
@@ -123,32 +193,9 @@ class HoverEnv:
         # compute observations
         self._update_observation()
 
-        self._update_history()
+        self.last_actions[:] = self.actions[:]
 
         return self.get_observations(), self.rew_buf, self.reset_buf, self.extras
-
-    def _apply_actions(self, actions):
-        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
-        exec_actions = self.actions
-
-        # 14468 is hover rpm
-        self.drone.set_propellers_rpm((1 + exec_actions * 0.8) * 14468.429183500699)
-
-    def _update_buffers(self):
-        self.last_base_pos[:] = self.base_pos[:]
-        self.base_pos[:] = self.drone.get_pos()
-        self.rel_pos = self.commands - self.base_pos
-        self.last_rel_pos = self.commands - self.last_base_pos
-        self.base_quat[:] = self.drone.get_quat()
-        self.base_euler = quat_to_xyz(
-            transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True
-        )
-        inv_base_quat = inv_quat(self.base_quat)
-        self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
-        self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
-
-    def _update_history(self):
-        self.last_actions[:] = self.actions[:]
 
     def _update_observation(self):
         self.obs_buf = torch.cat(
@@ -174,8 +221,8 @@ class HoverEnv:
             ),
         ),
         state=("actions", "last_actions"),
-        prepare=("_update_buffers", "_update_observation", "_update_history"),
-        action="_apply_actions",
+        action="actions",
+        skip=("reset_idx", "_resample_commands"),
     )
     def get_observations(self):
         return TensorDict({"policy": self.obs_buf}, batch_size=[self.num_envs])

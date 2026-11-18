@@ -18,9 +18,14 @@ from genesis.utils.leapp.environment import export_environment
 from go2_env import Go2Env
 
 
+class _TargetCaptured(Exception):
+    pass
+
+
 class _ActuatorRecorder:
     def control_dofs_position(self, targets, dofs_idx_local):
         self.targets = targets
+        raise _TargetCaptured
 
 
 def main():
@@ -53,6 +58,8 @@ def main():
     with torch.no_grad():
         bundle = export_environment(env, policy, args.output_dir)
         (bundle.parent / "scene.json").write_text(json.dumps(env_cfg, indent=2) + "\n")
+        env.scene.export(bundle.parent / "scene.gscene")
+        (bundle.parent / "bindings.json").write_text(json.dumps({"robot": env.robot.name}, indent=2) + "\n")
         deployment = LeappDeployment(env.scene, bundle, {"robot": env.robot}, reset_callback=reset_scene)
         deployment.reset()
         error_max = 0.0
@@ -65,7 +72,10 @@ def main():
             actions = policy(env.get_observations())
             reference = copy.copy(env)
             reference.robot = _ActuatorRecorder()
-            reference._apply_actions(actions)
+            try:
+                reference.step(actions)
+            except _TargetCaptured:
+                pass
             outputs = deployment.inference.run_policy(deployment.read_inputs({"command": env.commands}))
             actual = outputs[deployment.inference.outputs[0]]
             expected = reference.robot.targets.to(actual.device)
