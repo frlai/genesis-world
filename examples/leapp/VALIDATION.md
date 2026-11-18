@@ -54,17 +54,17 @@ These task metrics use CPU native and deployment rollouts. CUDA native rollouts 
 
 ## General exporter and deployment checks
 
-The final integrated native-export suite passed **17 tests in 124.14 seconds** with `--backend cpu --dev -n 2`. Six independent native-step deployment tests also passed on CUDA in 51.47 seconds. These exercise original inline step bodies, TensorDict observations, in-place history, repeated aliases, scalar commands, reset, physical actuator effects, native sampling, capture failure cleanup, and rejection of undeclared Genesis objects. Other focused exporter/deployment checks cover quaternion transforms, normalization, joint ordering, controller saturation, and control decimation. The earlier required control/API/tensor baseline passed 67 cases.
+All **20 focused CPU cases** passed across the final integration and native-environment runs. The complete nine-case native suite passed in 77.59 seconds after correcting a test that expected `ValueError` instead of the intended `TypeError` for unsupported resource wrappers. The preceding combined run passed the other 19 cases in 67.03 seconds. Six independent native-step deployment tests also passed on CUDA in 51.47 seconds. These exercise original inline step bodies, TensorDict observations, in-place history, repeated aliases, scalar commands, reset, physical actuator effects, native sampling, capture failure cleanup, and rejection of undeclared Genesis objects. Other focused exporter/deployment checks cover quaternion transforms, normalization, joint ordering, controller saturation, and control decimation. The earlier required control/API/tensor baseline passed 67 cases.
 
 Source checks confirm metadata-only changes: all 14 functions in each example environment preserve their signatures, bodies, comments, and scene construction. The rigid/drone entity boundary annotations likewise preserve the upstream function bodies. Repository Ruff checks and formatting passed on the changed examples and documentation.
 
-The native capture contract requires observation dependencies to come from decorated raw getters or declared environment input/state attributes after the physics boundary. Pre-physics derived locals reused afterward are unsupported. Termination decisions and scene-error masks are not policy inputs; native termination bookkeeping is pruned from the exported computation. Distinct cached tensor views sharing storage are rejected; repeated references to the same tensor are preserved. Ordinary custom objects remain shared read-only by contract, and undeclared Genesis objects cannot be accessed through the capture copy. These limits are explicit rather than reasons to freeze sample-dependent values silently.
+The native capture contract requires observation dependencies to come from decorated raw getters or declared environment input/state attributes after the physics boundary. Pre-physics tensor locals reused afterward are rejected by a capture-scoped Torch dispatch guard. Termination decisions and scene-error masks are not policy inputs; native termination bookkeeping is pruned from the exported computation. Distinct cached tensor views sharing storage are rejected; repeated references to the same tensor are preserved. Custom mutable wrappers are rejected before capture can access live resources, and undeclared Genesis objects cannot be accessed through the capture copy. The two local-tensor rejection cases and the wrapped-resource case verify that failed capture leaves source physics and actuator commands untouched. Both learned-policy CPU/CUDA exports and fresh standalone deployments were repeated with these guards enabled; errors and task metrics were unchanged.
 
 Run the focused suite with the optional extra installed:
 
 ```bash
-PYTHONPATH="$PWD" python -m pytest --backend cpu --dev tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py
-PYTHONPATH="$PWD" python -m pytest --backend gpu --dev tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py
+PYTHONPATH="$PWD" python -m pytest --backend cpu --dev -n 2 tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py tests/integration/test_leapp_environment.py
+PYTHONPATH="$PWD" python -m pytest --backend gpu --dev -n 0 tests/integration/test_leapp_export.py tests/integration/test_leapp_deployment.py tests/integration/test_leapp_environment.py
 ```
 
 ## Reproduce and locate evidence
@@ -82,13 +82,13 @@ python examples/locomotion/go2_deploy.py --bundle out/leapp_go2_native/policy/po
 python examples/drone/hover_deploy.py --bundle out/leapp_hover_native/policy/policy.yaml
 ```
 
-A consolidated copy is retained under `/home/frlai/workspaces/projs/genesis-world/out/leapp_validation/environment_export/`: `training/` contains checkpoints, configurations and curves; `bundles/` contains CPU/CUDA exports and rollout reports; `logs/` contains agent validation logs; `tested_sources/` preserves the exact example sources. Integrated test logs and dependency versions are at the archive root.
+A consolidated copy is retained under `/home/frlai/workspaces/projs/genesis-world/out/leapp_validation/native_environment/`: `training/` contains checkpoints, configurations and curves; `bundles/` contains CPU/CUDA exports and rollout reports; `logs/` contains agent validation logs; `tested_sources/` preserves the exact example sources. Integrated test logs and dependency versions are at the archive root.
 
 The original evidence lives in `/home/frlai/workspaces/projs/genesis-world-examples`:
 
 - `logs/leapp_{go2,hover}_native_20261117/`: configurations, checkpoints, curves, and source diffs.
 - `out/leapp_go2_native/` and `out/leapp_hover_native/`: CPU export bundles, validation reports, and deployment reports.
 - `out/leapp_{go2,hover}_native_gpu/`: CUDA capture bundles and validation reports.
-- `/tmp/genesis-leapp/examples/`: full training/export/deployment stdout, `training_native_evidence.json`, `native_environment_source_parity.json`, `probe_native_scene_roundtrip.py`, `native_scene_roundtrip.json`, the standalone import-blocking harness, and `native_tested_sources/` snapshots.
+- `/tmp/genesis-leapp/examples/`: full training/export/deployment stdout, `training_native_evidence.json`, `native_environment_source_parity.json`, `probe_native_scene_roundtrip.py`, `native_scene_roundtrip.json`, `native_guard_qualification.json` with final bundle hashes, the standalone import-blocking harness, and `native_tested_sources/` snapshots.
 
 Generated models and training artifacts are intentionally excluded from source control. This validation covers these two learned policies at batch size one and the documented fixed-shape contract; it uses the existing native scene format for its supported authored scenes; it does not add arbitrary-scene reconstruction or establish hardware deployment.

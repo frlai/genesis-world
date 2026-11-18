@@ -227,8 +227,8 @@ def export_environment(
     ``skip`` methods are disabled only on the owned snapshot to exclude command sampling and episode resets. Tensor
     attributes and ordinary containers are copied. Custom mutable objects are unsupported; unbound Genesis objects
     cannot be accessed. Pre-physics tensor locals cannot enter post-physics observations: the exporter rejects this
-    dependency instead of freezing discarded values. Repeated references to one tensor are supported, but distinct cached views sharing storage are
-    rejected. Views created inside ``step`` remain traced. A native step must call ``scene.step`` exactly once and
+    dependency instead of freezing discarded values. Repeated references to one tensor are supported, but distinct
+    cached views sharing storage are rejected. Views created inside ``step`` remain traced. A native step must call ``scene.step`` exactly once and
     return observations, either directly or as the first tuple item.
 
     Initialize the environment before export. Declared state attributes supply deployment reset values unless
