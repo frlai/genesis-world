@@ -4,6 +4,7 @@ import torch
 from tensordict import TensorDict
 
 import genesis as gs
+from genesis.utils.leapp import EnvironmentInput, TensorMetadata, policy_environment
 from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
 
 
@@ -202,6 +203,25 @@ class Go2Env:
 
         return self.get_observations(), self.rew_buf, self.reset_buf, self.extras
 
+    @policy_environment(
+        entities=("robot",),
+        inputs=(
+            EnvironmentInput(
+                "command",
+                "commands",
+                semantics=TensorMetadata(
+                    kind="frame/twist",
+                    system_axis=0,
+                    component_names=("x", "y", "angular_z"),
+                    expressed_in="robot/base",
+                    is_setpoint=True,
+                ),
+            ),
+        ),
+        state=("actions", "last_actions"),
+        action="actions",
+        skip=("_reset_idx", "_resample_commands"),
+    )
     def get_observations(self):
         return TensorDict({"policy": self.obs_buf}, batch_size=[self.num_envs])
 

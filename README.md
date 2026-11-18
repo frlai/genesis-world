@@ -124,6 +124,7 @@ It is recommended to systematically execute `pip install -e ".[dev]"` after movi
 
 | | |
 |---|---|
+| Policy pipeline export | `pip install -e ".[leapp]"` (source checkout). See [LEAPP export and deployment](examples/leapp/README.md). |
 | IPC solver (uipc backend) | `pip install pyuipc` *(Linux / Windows x86, NVIDIA GPU)* |
 | Nyx renderer | `pip install gs-nyx` — see [genesis-nyx](https://github.com/Genesis-Embodied-AI/genesis-nyx) |
 

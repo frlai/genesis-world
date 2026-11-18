@@ -4,6 +4,7 @@ import copy
 from tensordict import TensorDict
 
 import genesis as gs
+from genesis.utils.leapp import EnvironmentInput, TensorMetadata, policy_environment
 from genesis.utils.geom import (
     quat_to_xyz,
     transform_by_quat,
@@ -208,6 +209,21 @@ class HoverEnv:
             axis=-1,
         )
 
+    @policy_environment(
+        entities=("drone",),
+        inputs=(
+            EnvironmentInput(
+                "command",
+                "commands",
+                semantics=TensorMetadata(
+                    kind="frame/position", system_axis=0, component_names=("x", "y", "z"), is_setpoint=True
+                ),
+            ),
+        ),
+        state=("actions", "last_actions"),
+        action="actions",
+        skip=("reset_idx", "_resample_commands"),
+    )
     def get_observations(self):
         return TensorDict({"policy": self.obs_buf}, batch_size=[self.num_envs])
 
