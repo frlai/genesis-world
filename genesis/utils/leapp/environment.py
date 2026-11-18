@@ -3,13 +3,59 @@
 import copy
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from types import MethodType
+from types import BuiltinFunctionType, FunctionType, MethodType
+from enum import Enum
+from functools import partial
 
 import numpy as np
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
+from torch.utils._pytree import tree_leaves
 
 from .annotations import get_boundary, get_policy_environment
 from .export import export_policy
+
+
+class _PreambleGuard(TorchDispatchMode):
+    """Reject values escaping the discarded pre-physics computation into policy inference."""
+
+    def __init__(self, scene):
+        super().__init__()
+        self.scene = scene
+        self.tensors = {}
+        self.derived = set()
+        self.is_injecting = False
+        self.is_reading = False
+
+    def track(self, values, *, is_derived=True):
+        for value in tree_leaves(values):
+            if isinstance(value, torch.Tensor):
+                self.tensors[id(value)] = value
+                if is_derived:
+                    self.derived.add(id(value))
+
+    def check(self, values):
+        if any(id(value) in self.tensors for value in tree_leaves(values) if isinstance(value, torch.Tensor)):
+            raise ValueError(
+                "A tensor from before scene.step is used after the capture boundary. Read state and compute policy "
+                "observations after scene.step; pre-physics local values cannot be exported as constants."
+            )
+
+    def __torch_dispatch__(self, function, types, args=(), kwargs=None):
+        kwargs = {} if kwargs is None else kwargs
+        if self.is_reading:
+            return function(*args, **kwargs)
+        values = (args, kwargs)
+        if self.scene.is_observing and not self.is_injecting:
+            self.check(values)
+        elif not self.is_injecting and function == torch.ops.aten._local_scalar_dense.default:
+            self.check(values)
+        result = function(*args, **kwargs)
+        if not self.scene.is_observing or (
+            self.is_injecting and any(id(value) in self.derived for value in tree_leaves(values))
+        ):
+            self.track(result)
+        return result
 
 
 class _CaptureComplete(Exception):
@@ -28,12 +74,12 @@ class _CaptureScene:
     def __init__(self, scene, begin_observation):
         self.scene = scene
         self.begin_observation = begin_observation
-        self.observing = False
+        self.is_observing = False
 
     def step(self, *args, **kwargs):
-        if self.observing:
+        if self.is_observing:
             raise _CaptureComplete()
-        self.observing = True
+        self.is_observing = True
         self.begin_observation()
 
     def get_error_envs_mask(self):
@@ -51,11 +97,24 @@ class _CaptureEntity:
 
     def __getattr__(self, name):
         boundary = get_boundary(self.entity, name)
-        if self.scene.observing:
-            return getattr(self.adapter, name)
+        return partial(self._call, name, boundary)
+
+    def _call(self, name, boundary, *args, **kwargs):
+        guard = self.scene.guard
+        if self.scene.is_observing:
+            if boundary.value_parameter is not None:
+                guard.check((args, kwargs))
+                return getattr(self.adapter, name)(*args, **kwargs)
+            guard.is_reading = True
+            try:
+                return getattr(self.adapter, name)(*args, **kwargs).clone()
+            finally:
+                guard.is_reading = False
         if boundary.value_parameter is None:
-            return getattr(self.entity, name)
-        return _skip
+            value = getattr(self.entity, name)(*args, **kwargs)
+            guard.track(value)
+            return value
+        return None
 
 
 def _skip(*args, **kwargs):
@@ -85,8 +144,37 @@ def _snapshot(value, memo):
             memo[identity] = MethodType(item.__func__, memo[id(item.__self__)])
         elif type(item).__module__.startswith("genesis.") and type(item).__module__ != __name__:
             memo[identity] = _UnavailableObject(type(item).__name__)
-        else:
+        elif type(item).__module__ == __name__ or isinstance(
+            item,
+            (
+                type(None),
+                str,
+                bytes,
+                bool,
+                int,
+                float,
+                complex,
+                slice,
+                range,
+                type,
+                Path,
+                Enum,
+                torch.device,
+                torch.dtype,
+                torch.layout,
+                torch.memory_format,
+                np.generic,
+                np.dtype,
+                FunctionType,
+                BuiltinFunctionType,
+            ),
+        ):
             memo[identity] = item
+        else:
+            raise TypeError(
+                f"Unsupported environment attribute type '{type(item).__name__}'. Store tensors and ordinary "
+                "containers directly on the environment; custom mutable resource wrappers cannot be captured."
+            )
     return copy.deepcopy(value, memo)
 
 
@@ -137,8 +225,9 @@ def export_environment(
     the physics boundary. No capture pass advances physics or writes to live entities.
 
     ``skip`` methods are disabled only on the owned snapshot to exclude command sampling and episode resets. Tensor
-    attributes and ordinary containers are copied; other custom objects are shared read-only. Unbound Genesis objects
-    cannot be accessed. Repeated references to one tensor are supported, but distinct cached views sharing storage are
+    attributes and ordinary containers are copied. Custom mutable objects are unsupported; unbound Genesis objects
+    cannot be accessed. Pre-physics tensor locals cannot enter post-physics observations: the exporter rejects this
+    dependency instead of freezing discarded values. Repeated references to one tensor are supported, but distinct cached views sharing storage are
     rejected. Views created inside ``step`` remain traced. A native step must call ``scene.step`` exactly once and
     return observations, either directly or as the first tuple item.
 
@@ -189,16 +278,21 @@ def export_environment(
         attributes_before_step = {}
 
         def begin_observation():
-            injected = _snapshot(state, {})
-            injected.update((inputs[name].attribute, value) for name, value in _snapshot(external, {}).items())
-            memo = {id(owned): owned}
-            for attribute, value in injected.items():
-                memo[id(attributes_before_step[attribute])] = value
-                memo[id(getattr(owned, attribute))] = value
-            owned.__dict__ = _snapshot(vars(owned), memo)
+            guard.is_injecting = True
+            try:
+                injected = _snapshot(state, {})
+                injected.update((inputs[name].attribute, value) for name, value in _snapshot(external, {}).items())
+                memo = {id(owned): owned}
+                for attribute, value in injected.items():
+                    memo[id(attributes_before_step[attribute])] = value
+                    memo[id(getattr(owned, attribute))] = value
+                owned.__dict__ = _snapshot(vars(owned), memo)
+            finally:
+                guard.is_injecting = False
 
         scene = next(iter(entities.values())).scene
         capture_scene = _CaptureScene(scene, begin_observation)
+        guard = capture_scene.guard = _PreambleGuard(capture_scene)
         memo = {id(env): owned, id(scene): capture_scene}
         memo.update((id(entity), _UnavailableObject(type(entity).__name__)) for entity in scene.entities)
         memo.update(
@@ -215,21 +309,28 @@ def export_environment(
         action_template = getattr(owned, metadata.action)
         if not isinstance(action_template, torch.Tensor):
             raise TypeError("The annotated environment action attribute must be a Torch tensor.")
-        try:
-            result = owned.step(torch.zeros_like(action_template))
-        except _CaptureComplete:
-            raise ValueError("Native environment step must call scene.step exactly once.") from None
-        if not capture_scene.observing:
-            raise ValueError("Native environment step must call scene.step exactly once.")
-        observations = result[0] if isinstance(result, tuple) else result
-        if observations is None:
-            raise ValueError("Native environment step must return policy observations.")
-        actions = policy(observations)
-        try:
-            owned.step(actions)
-        except _CaptureComplete:
-            return {attribute: getattr(owned, attribute) for attribute in metadata.state}
-        raise ValueError("Native action processing did not reach the scene.step boundary.")
+        dummy_action = torch.zeros_like(action_template)
+        guard.track(vars(owned), is_derived=False)
+        guard.track(dummy_action)
+        with guard:
+            try:
+                result = owned.step(dummy_action)
+            except _CaptureComplete:
+                raise ValueError("Native environment step must call scene.step exactly once.") from None
+            if not capture_scene.is_observing:
+                raise ValueError("Native environment step must call scene.step exactly once.")
+            observations = result[0] if isinstance(result, tuple) else result
+            if observations is None:
+                raise ValueError("Native environment step must return policy observations.")
+            guard.check(observations)
+            actions = policy(observations)
+            try:
+                owned.step(actions)
+            except _CaptureComplete:
+                state_next = {attribute: getattr(owned, attribute) for attribute in metadata.state}
+                guard.check(state_next)
+                return state_next
+            raise ValueError("Native action processing did not reach the scene.step boundary.")
 
     return export_policy(
         step,
