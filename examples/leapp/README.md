@@ -33,18 +33,18 @@ from genesis.utils.leapp import EnvironmentInput, TensorMetadata, policy_environ
     entities=("robot",),
     inputs=(EnvironmentInput("command", "commands", semantics=TensorMetadata(system_axis=0)),),
     state=("actions", "last_actions"),
-    prepare=("_update_buffers", "_update_observation", "_update_history"),
-    action="_apply_actions",
+    action="actions",
+    skip=("_reset_idx", "_resample_commands"),
 )
 def get_observations(self):
     return self.obs_buf  # Keep the environment's actual return type and body.
 ```
 
-The `prepare` methods run in order before `policy(env.get_observations())`; `action` then processes the policy output and calls annotated actuator setters. Keep physics, reward computation, termination, reset, and command sampling outside these methods. The Go2 and drone examples extract these contiguous regions from their original `step` methods, preserving native execution order and in-place buffer writes. Their scene builders remain shared with the standalone launchers.
+The exporter runs the original `step` method around its `scene.step()` boundary on owned environment copies. It reads raw state, follows the original observation and history updates, calls the policy on the returned observations, and captures the next original action-processing prefix. Physics is not advanced during capture. `action` names the tensor attribute defining action shape; `skip` names reset and command-sampling methods that must not run on the capture copy. The Go2 and drone environment bodies, scene construction, comments, and execution order remain unchanged. Observations after `scene.step()` must derive from decorated raw getters or declared environment input/state attributes. Locals calculated before the physics boundary and reused afterward are outside this capture contract. Termination decisions remain outside the exported policy; scene-error masks may only support unused native termination bookkeeping.
 
-The feedback boundary is immediately before observation construction. Both examples carry `actions` and `last_actions`: observations read their original history slot, then `_update_history` copies the previous action before the new policy output is processed. This preserves Go2's actuator delay and the drone's older observation action. Reset restores the exported initial values. Export a freshly initialized environment for its canonical initial state, or pass an explicit `initial_state={...}` when exporting an environment that has already stepped. A live snapshot is not necessarily the task's reset state.
+The feedback boundary is at the physics boundary, before the original post-step buffer and observation updates. Both examples carry `actions` and `last_actions`: observations read their original history slot, then the existing history assignment copies the previous action before the new policy output is processed. This preserves Go2's actuator delay and the drone's older observation action. Reset restores the exported initial values. Export a freshly initialized environment for its canonical initial state, or pass an explicit `initial_state={...}` when exporting an environment that has already stepped. A live snapshot is not necessarily the task's reset state.
 
-Declare every external input and persistent tensor state. Other configuration tensors are constants, and custom nested objects are shared read-only during capture. Repeated references to one tensor are supported. Create tensor views inside the inference methods; distinct cached tensors sharing storage produce a binding error.
+Declare every external input and persistent tensor state. Other configuration tensors are constants. Ordinary custom objects are shared read-only by contract and must not be mutated during capture; access to undeclared Genesis objects is rejected. Repeated references to one tensor are supported. Create tensor views inside the inference methods; distinct cached tensors sharing storage produce a binding error.
 
 Optional `sample_inputs` gives callers control of sample collection; otherwise `capture_steps` defaults to five. The callback API below remains useful for standalone tensor pipelines that have no environment methods.
 
@@ -139,6 +139,6 @@ The complete model includes relative-target computation, frame transforms, obser
 
 The native reference and independent deployment each run 4,500 steps, spanning three 15-second episodes when successful, with target changes and reset. Reports include target tracking, minimum altitude, episode failures, actuator error in RPM, and action-feedback error.
 
-Each exporter writes `validation.json` and the example's `scene.json` beside the pipeline. Each deployment launcher writes `rollout.json` under its output directory. The scene file contains only the example's authored setup. General exporters and runners have no task-name dispatch.
+Each exporter writes `validation.json`, the example's reset/metric configuration in `scene.json`, and logical-to-scene entity names in `bindings.json` beside the pipeline. It also calls Genesis's existing `Scene.export()` to write the authored scene and assets to `scene.gscene`. Standalone launchers use `Scene.load()` and build that scene, resolve entity names, and run `LeappDeployment`; they import neither the training environment nor the trainer or original policy class. Each launcher writes `rollout.json` under its output directory. Unsupported scene content follows the native serialization API's errors and warnings. General exporters and runners have no task-name dispatch or custom scene reconstruction.
 
 Measured full-training and deployment results are recorded in [VALIDATION.md](VALIDATION.md).

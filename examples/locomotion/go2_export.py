@@ -44,7 +44,6 @@ def main():
     log_dir = Path("logs") / args.exp_name
     with (log_dir / "cfgs.pkl").open("rb") as stream:
         env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg = pickle.load(stream)
-    reward_cfg["reward_scales"] = {}
     env = Go2Env(1, env_cfg, obs_cfg, reward_cfg, command_cfg)
     runner = OnPolicyRunner(env, train_cfg, log_dir=None, device=gs.device)
     runner.load(str(log_dir / f"model_{args.ckpt}.pt"))
