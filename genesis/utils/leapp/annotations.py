@@ -64,22 +64,22 @@ class PolicyEnvironment:
     entities: tuple[str, ...]
     inputs: tuple[EnvironmentInput, ...]
     state: tuple[str, ...]
-    prepare: tuple[str, ...]
     action: str
+    skip: tuple[str, ...]
     step_dt: str
 
 
 _ENVIRONMENTS = {}
 
 
-def policy_environment(*, entities, inputs=(), state=(), prepare=(), action, step_dt="dt"):
-    """Describe original inference methods on ``get_observations`` without changing execution.
+def policy_environment(*, entities, inputs=(), state=(), action="actions", skip=(), step_dt="dt"):
+    """Describe native environment capture on ``get_observations`` without changing execution.
 
-    ``prepare`` lists methods run before the observation getter, including any history update that ordinarily follows
-    observation construction. ``action`` processes one policy action and writes actuator targets, without physics.
-    Entity, external input and feedback attributes are replaced only on export-owned environment snapshots.
+    ``action`` names the tensor attribute supplying the action shape. ``skip`` lists training-only methods, such as
+    command resampling and episode reset, disabled only on export-owned snapshots. The original ``step`` method must
+    call ``scene.step`` exactly once and return observations first; capture interposes that physics boundary.
     """
-    metadata = PolicyEnvironment(tuple(entities), tuple(inputs), tuple(state), tuple(prepare), action, step_dt)
+    metadata = PolicyEnvironment(tuple(entities), tuple(inputs), tuple(state), action, tuple(skip), step_dt)
 
     def decorate(function):
         _ENVIRONMENTS[function] = metadata
