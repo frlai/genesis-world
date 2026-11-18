@@ -267,6 +267,7 @@ def test_environment_collects_native_samples(tmp_path):
             self.scene = scene
             self.robot = robot
             self.dt = scene.dt
+            self.frame = gs.link_ref_frame.root_COM
             self.command = torch.full((1, 2), 0.3, device=gs.device, dtype=gs.tc_float)
             self.actions = torch.zeros_like(self.command)
             self.previous = torch.zeros_like(self.actions)
@@ -289,6 +290,8 @@ def test_environment_collects_native_samples(tmp_path):
             action="actions",
         )
         def get_observations(self):
+            if self.frame != gs.link_ref_frame.root_COM:
+                raise ValueError("Unsupported reference frame.")
             return TensorDict({"policy": self.observation}, batch_size=[1])
 
         def step(self, actions):

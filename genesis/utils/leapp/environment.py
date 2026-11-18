@@ -142,7 +142,11 @@ def _snapshot(value, memo):
             pending.extend(item)
         elif isinstance(item, MethodType) and id(item.__self__) in memo:
             memo[identity] = MethodType(item.__func__, memo[id(item.__self__)])
-        elif type(item).__module__.startswith("genesis.") and type(item).__module__ != __name__:
+        elif (
+            type(item).__module__.startswith("genesis.")
+            and type(item).__module__ != __name__
+            and not isinstance(item, Enum)
+        ):
             memo[identity] = _UnavailableObject(type(item).__name__)
         elif type(item).__module__ == __name__ or isinstance(
             item,
