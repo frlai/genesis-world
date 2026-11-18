@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -50,8 +52,18 @@ class _ArmEnvironment:
         self.events = []
         self.fail = False
         self.physics_steps = 1
+        self.local_source = None
+        self.resources = None
 
     def step(self, actions):
+        if self.resources is not None:
+            self.resources.scene.step()
+        if self.local_source == "action":
+            local = actions.clone()
+        elif self.local_source == "getter":
+            local = self.robot.get_dofs_position([1, 0])
+        else:
+            local = None
         if self.extra is not None:
             self.extra.set_pos((3.0, 0.0, 0.0), zero_velocity=True)
         self.actions = torch.clip(actions, -0.4, 0.4)
@@ -59,6 +71,8 @@ class _ArmEnvironment:
         self.robot.control_dofs_force(self.targets, [1, 0])
         for _ in range(self.physics_steps):
             self.scene.step()
+        if local is not None:
+            self.commands.add_(local)
         position = self.robot.get_dofs_position([1, 0])
         velocity = self.robot.get_dofs_velocity([1, 0])
         self.history.copy_(torch.cat((self.history[:, 1:], position[:, None]), dim=1))
@@ -256,5 +270,30 @@ def test_environment_blocks_undeclared_entity_writes(tmp_path, policy):
     with pytest.raises(ValueError, match="not a declared environment export boundary"):
         export_environment(env, policy, tmp_path)
     assert_equal(env.extra.get_pos(), position)
+    assert env.events == []
+    assert_equal(env.scene.get_time(), 0)
+
+
+@pytest.mark.required
+@pytest.mark.precision("32")
+@pytest.mark.parametrize("local_source", ["action", "getter"])
+def test_environment_rejects_prephysics_locals(tmp_path, policy, local_source):
+    env = _ArmEnvironment()
+    env.local_source = local_source
+    commands = env.commands.clone()
+    with pytest.raises(ValueError, match="before scene.step"):
+        export_environment(env, policy, tmp_path)
+    assert_equal(env.commands, commands)
+    assert env.events == []
+    assert_equal(env.scene.get_time(), 0)
+
+
+@pytest.mark.required
+@pytest.mark.precision("32")
+def test_environment_rejects_wrapped_resources(tmp_path, policy):
+    env = _ArmEnvironment()
+    env.resources = SimpleNamespace(scene=env.scene)
+    with pytest.raises(ValueError, match="Unsupported environment attribute type"):
+        export_environment(env, policy, tmp_path)
     assert env.events == []
     assert_equal(env.scene.get_time(), 0)
