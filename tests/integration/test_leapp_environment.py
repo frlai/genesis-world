@@ -293,7 +293,7 @@ def test_environment_rejects_prephysics_locals(tmp_path, policy, local_source):
 def test_environment_rejects_wrapped_resources(tmp_path, policy):
     env = _ArmEnvironment()
     env.resources = SimpleNamespace(scene=env.scene)
-    with pytest.raises(ValueError, match="Unsupported environment attribute type"):
+    with pytest.raises(TypeError, match="Unsupported environment attribute type"):
         export_environment(env, policy, tmp_path)
     assert env.events == []
     assert_equal(env.scene.get_time(), 0)
